@@ -81,6 +81,8 @@ let save = {
   notes: [],
   best: {},
   endlessBest: 0,
+  xp: 0,
+  atWizard: 0,
   achievements: [],
   upgrades: [],
   stats: {
@@ -100,6 +102,7 @@ let save = {
     ambVol: 0.75,
     screenShake: true,
     crtEffect: true,
+    character: 0,
     particles: 'high'
   }
 };
@@ -114,6 +117,8 @@ try {
       save.notes = Array.isArray(s.notes) ? s.notes : [];
       save.best = (s.best && typeof s.best === 'object') ? s.best : {};
       save.endlessBest = s.endlessBest || 0;
+      save.xp = s.xp || 0;
+      save.atWizard = s.atWizard || 0;
       if (Array.isArray(s.achievements)) save.achievements = s.achievements;
       if (Array.isArray(s.upgrades)) save.upgrades = s.upgrades;
       if (s.stats && typeof s.stats === 'object') Object.assign(save.stats, s.stats);
@@ -476,6 +481,15 @@ const isSneaking = () => !!keys.KeyC || sneakToggle;
 function buildLevel(cfg, seed) {
   const rng = mulberry32(seed);
   const m = genMaze(cfg.cells[0], cfg.cells[1], rng);
+
+  // The wizard's cave: knock out every inner wall, then leave a few rock pillars
+  if (cfg.wizard) {
+    for (let y = 1; y < m.gh - 1; y++) for (let x = 1; x < m.gw - 1; x++) m.g[y * m.gw + x] = 0;
+    for (let k = 0; k < 14; k++) {
+      const x = 4 + 2 * Math.floor(rng() * ((m.gw - 8) / 2)), y = 4 + 2 * Math.floor(rng() * ((m.gh - 8) / 2));
+      if (Math.abs(x - m.gw / 2) > 2 || Math.abs(y - m.gh / 2) > 2) m.g[y * m.gw + x] = 1;
+    }
+  }
   
   lv = {
     ...m,
@@ -509,7 +523,7 @@ function buildLevel(cfg, seed) {
 
   // Hidden lore note in a dead-end
   lv.note = null;
-  if (mode === 'story' && NOTES[levelIdx]) {
+  if (mode === 'story' && !cfg.wizard && NOTES[levelIdx]) {
     let pool = cells.filter(i => i !== fi && d[i] > 4 && openNeighbors(i).length === 1);
     if (!pool.length) pool = cells.filter(i => i !== fi && d[i] > 4);
     if (pool.length) {
@@ -551,6 +565,16 @@ function buildLevel(cfg, seed) {
       const cIdx = chimePool[Math.floor(rng() * chimePool.length)];
       lv.chime = { ...centerOf(cIdx), idx: cIdx, ringing: 0, cooldown: 0 };
     }
+  }
+
+  // How brightly sound has lit each floor tile
+  lv.lit = new Float32Array(m.gw * m.gh);
+
+  // The wizard stands in the middle of his cave
+  lv.wizard = null;
+  if (cfg.wizard) {
+    lv.pebbles = 0;
+    lv.wizard = centerOf(((m.gh >> 1) | 1) * m.gw + ((m.gw >> 1) | 1));
   }
 
   // Acoustic Sealed Door
@@ -662,8 +686,22 @@ function buildLevel(cfg, seed) {
   }
 }
 
+// Story mode visits the wizard after these levels (0-based): after Depth 4 and after Depth 6
+const WIZARD_AFTER = [3, 5];
+const WIZARD_CFG = {
+  theme: 'wizard',
+  name: "The Wizard's Hollow",
+  cells: [12, 9],
+  surf: SURF_STONE,
+  wizard: true,
+  safe: true,
+  hint: 'A warm light in the rock. Someone lives down here.'
+};
+let wizardStop = 0; // 0 = not at the wizard, 1 or 2 = which visit
+
 function startLevel(newSeed) {
-  const cfg = mode === 'story' ? LEVELS[levelIdx] : endlessCfg(endlessRound);
+  const cfg = mode !== 'story' ? endlessCfg(endlessRound)
+    : wizardStop ? { ...WIZARD_CFG, seed: 700 + wizardStop } : LEVELS[levelIdx];
   if (mode === 'story') curSeed = cfg.seed;
   else if (newSeed) curSeed = Math.floor(Math.random() * 1e9);
 
@@ -697,6 +735,16 @@ function startLevel(newSeed) {
 
 function nextLevel() {
   if (mode === 'story') {
+    if (!wizardStop && WIZARD_AFTER.includes(levelIdx)) {
+      wizardStop = WIZARD_AFTER.indexOf(levelIdx) + 1;
+      save.depth = Math.max(save.depth, levelIdx + 2);
+      save.atWizard = wizardStop;
+      persist();
+      startLevel(true);
+      return;
+    }
+    wizardStop = 0;
+    save.atWizard = 0;
     if (levelIdx >= LEVELS.length - 1) {
       save.completed = true;
       save.depth = LEVELS.length;
@@ -725,6 +773,7 @@ function nextLevel() {
 
 function toTitle() {
   state = 'title';
+  wizardStop = 0;
   lv = null;
   enemies = [];
   ripples = [];
@@ -816,6 +865,7 @@ function hitWall(ox, oy, bx, by, inten, waveType, wave) {
     lv.secretWall.seen = Math.max(lv.secretWall.seen, inten);
     if (wave && wave.hurts && inten > 0.6) {
       lv.secretWall.broken = true;
+      lv.g[by * lv.gw + bx] = 0;
       shake = Math.max(shake, 6);
       sfx.kill(panOf(ox));
       spawnRipple(lv.secretWall.x, lv.secretWall.y, { n: 80, maxR: 180, speed: 200, alpha: 0.8 });
@@ -891,6 +941,8 @@ function updateRipples(dt) {
           hitWall(ox, oy, btx, bty, inten, waveType, rp);
           continue;
         }
+        const li = bty * lv.gw + btx;
+        if (lv.lit[li] < inten) lv.lit[li] = inten;
 
         // Check Chime activation by soundwave
         if (lv.chime && rp.src !== lv.chime) {
@@ -962,6 +1014,7 @@ function updateRipples(dt) {
 // ============================================================================
 const MAX_HP = { listener: 160, drifter: 35, mimic: 520, sleeper: 300 };
 const NAMES = { listener: 'The Listener', drifter: 'A Drifter', mimic: 'The Mimic', sleeper: 'The Sleeper' };
+const XP_REWARD = { listener: 200, drifter: 100, sleeper: 500, mimic: 1000 };
 const HURT_RANGE = 8 * T;
 
 function hurt(e, dist) {
@@ -976,6 +1029,8 @@ function damage(e, amount) {
   if (e.hp <= 0) {
     const idx = enemies.indexOf(e);
     if (idx >= 0) enemies.splice(idx, 1);
+    save.xp += XP_REWARD[e.type] || 0;
+    persist();
     killText = `${NAMES[e.type]} is destroyed.`;
     killT = 3.5;
     sfx.kill(panOf(e.x));
@@ -1407,6 +1462,10 @@ function update(dt) {
     if (marks[k].life <= 0) marks.splice(k, 1);
   }
 
+  for (let k = 0; k < lv.lit.length; k++) {
+    if (lv.lit[k] > 0) lv.lit[k] = Math.max(0, lv.lit[k] - decayRate);
+  }
+
   lv.exitSeen = Math.max(lv.exitFloor, lv.exitSeen - dt / 3);
   lv.noteSeen = Math.max(0, lv.noteSeen - dt / 6);
   if (lv.upgradeItem) lv.upgradeItem.seen = Math.max(0, lv.upgradeItem.seen - dt / 5);
@@ -1500,6 +1559,7 @@ function update(dt) {
     flashRed = false;
     sfx.descend();
     stopHum();
+    if (lv.cfg.wizard) return; // no records or achievements for the wizard's cave
 
     // Achievements check
     if (levelClaps === 0) unlockAchievement('silent_run');
@@ -1596,43 +1656,378 @@ for (let k = 0; k < 4; k++) {
   grain.push(ctx.createPattern(c, 'repeat'));
 }
 
+// ============================================================================
+// 10b. PIXEL ART MADE IN CODE: THEMED TILES & SPRITES
+// ============================================================================
+function mkCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  return c;
+}
+
+// floor: [base colour, second colour, pattern, accent colour]
+// Walls are never filled in. Only their edge is drawn, in the theme's style:
+// rock = jagged, brick = mortar ticks, steel = straight with wires, hive = scalloped, vein = pulsing vein
+const THEMES = {
+  entrance:   { floor: ['#2c2b30', '#3b3940', 'cobble'],           edge: '#e6eeff', style: 'rock' },
+  whispering: { floor: ['#232a3a', '#303a50', 'flag'],             edge: '#cfe0ff', style: 'brick' },
+  laboratory: { floor: ['#2e3438', '#444c52', 'plate', '#6a747b'], edge: '#c8f0ff', style: 'steel', wires: ['#35d0c0', '#c9a227'] },
+  flooded:    { floor: ['#0f3a44', '#17525e', 'water', '#5fc6d0'], edge: '#a8e0f5', style: 'brick' },
+  collapsed:  { floor: ['#3a2c1f', '#4a3a29', 'dirt', '#6b5a45'],  edge: '#d2f0d0', style: 'rock' },
+  chasm:      { floor: ['#262233', '#342e47', 'vein', '#b07cff'],  edge: '#e0d0ff', style: 'rock' },
+  hive:       { floor: ['#4a3410', '#614616', 'hex', '#c98f2a'],   edge: '#ffe0a0', style: 'hive' },
+  heart:      { floor: ['#1c1418', '#2a1d22', 'vein', '#c2283a'],  edge: '#ffc8d0', style: 'vein', wires: ['#ff4055'] },
+  wizard:     { floor: ['#4a4034', '#5c5042', 'dirt', '#7a6a55'],  edge: '#ffe8c0', style: 'rock' }
+};
+
+function makeTile(spec, seed) {
+  const [base, alt, pat, acc = alt] = spec;
+  const c = mkCanvas(16, 16), g = c.getContext('2d'), r = mulberry32(seed);
+  const DARK = 'rgba(0,0,0,0.38)', LITE = 'rgba(255,255,255,0.13)';
+  const p = (x, y, col) => { g.fillStyle = col; g.fillRect(((x % 16) + 16) % 16, ((y % 16) + 16) % 16, 1, 1); };
+  const ri = n => Math.floor(r() * n);
+  const walk = (col, n) => {
+    let x = ri(16), y = ri(16);
+    for (let i = 0; i < n; i++) { p(x, y, col); x += ri(3) - 1; y += r() < 0.7 ? 1 : 0; }
+  };
+  const blocks = (w, h) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const row = Math.floor(y / h), ox = (row % 2) * (w / 2);
+      if (y % h === h - 1 || (x + ox) % w === w - 1) p(x, y, DARK);
+      else if (y % h === 0) p(x, y, LITE);
+    }
+  };
+
+  g.fillStyle = base;
+  g.fillRect(0, 0, 16, 16);
+  for (let i = 0; i < 70; i++) p(ri(16), ri(16), alt);
+
+  if (pat === 'cobble') {
+    blocks(8, 8);
+  } else if (pat === 'hex') {
+    blocks(8, 4);
+    for (let y = 1; y < 16; y += 4) for (let x = 3; x < 16; x += 8) p(x + (Math.floor(y / 4) % 2) * 4, y, acc);
+  } else if (pat === 'flag' || pat === 'plate') {
+    for (let i = 0; i < 16; i++) { p(15, i, DARK); p(i, 15, DARK); p(0, i, LITE); p(i, 0, LITE); }
+    if (pat === 'plate') {
+      for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) p(x, y, acc);
+      for (let i = 5; i < 11; i++) p(i, 15 - i, LITE);
+    }
+  } else if (pat === 'water') {
+    for (let i = 0; i < 4; i++) { const x = ri(16), y = ri(16); p(x, y, acc); p(x + 1, y, acc); p(x + 2, y, LITE); }
+  } else if (pat === 'dirt') {
+    for (let i = 0; i < 6; i++) p(ri(16), ri(16), acc);
+    for (let i = 0; i < 4; i++) p(ri(16), ri(16), DARK);
+  } else if (pat === 'vein') {
+    walk(acc, 13);
+    walk(acc, 9);
+    walk(DARK, 8);
+  }
+  return c;
+}
+
+const TILESETS = {};
+function tileset(theme) {
+  if (!TILESETS[theme]) TILESETS[theme] = [0, 1, 2].map(v => makeTile(THEMES[theme].floor, 11 + v * 97));
+  return TILESETS[theme];
+}
+
+const themeOf = () => (lv && THEMES[lv.cfg.theme]) ? lv.cfg.theme : 'entrance';
+
+// Floor tiles only: the paths. They stay dark until sound reaches them. Walls are left black.
+function drawTiles() {
+  const ts = tileset(themeOf());
+  const hw = W / 2 / ZOOM, hh = H / 2 / ZOOM;
+  const x0 = Math.max(0, Math.floor((cam.x - hw) / T) - 1);
+  const x1 = Math.min(lv.gw - 1, Math.ceil((cam.x + hw) / T) + 1);
+  const y0 = Math.max(0, Math.floor((cam.y - hh) / T) - 1);
+  const y1 = Math.min(lv.gh - 1, Math.ceil((cam.y + hh) / T) + 1);
+  const full = lightMode || lv.cfg.safe;
+
+  ctx.imageSmoothingEnabled = false;
+  for (let ty = y0; ty <= y1; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      const i = ty * lv.gw + tx;
+      if (lv.g[i]) continue;
+      let a = full ? 1 : lv.lit[i];
+      if (a < 1) {
+        // a faint glow right around the player
+        const d = Math.hypot((tx + 0.5) * T - player.x, (ty + 0.5) * T - player.y);
+        a = Math.max(a, 0.22 * clamp(1 - d / 60, 0, 1));
+      }
+      if (a < 0.02) continue;
+      ctx.globalAlpha = Math.min(1, a);
+      ctx.drawImage(ts[(tx * 7 + ty * 13) % 3], tx * T, ty * T, T + 0.5, T + 0.5);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// A sprite is a list of small canvases (frames) drawn with pixel helpers.
+function outlineSprite(c, col) {
+  const g = c.getContext('2d'), w = c.width, h = c.height, d = g.getImageData(0, 0, w, h).data;
+  const op = (x, y) => x >= 0 && y >= 0 && x < w && y < h && d[(y * w + x) * 4 + 3] > 0;
+  g.fillStyle = col;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (!op(x, y) && (op(x - 1, y) || op(x + 1, y) || op(x, y - 1) || op(x, y + 1))) g.fillRect(x, y, 1, 1);
+  }
+}
+
+function makeSprite(n, draw, size = 24) {
+  const frames = [];
+  for (let f = 0; f < n; f++) {
+    const c = mkCanvas(size, size), g = c.getContext('2d');
+    const P = {
+      r(x, y, w, h, col) { g.fillStyle = col; g.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); },
+      e(cx, cy, rx, ry, col) {
+        g.fillStyle = col;
+        for (let y = Math.floor(cy - ry); y <= cy + ry; y++) for (let x = Math.floor(cx - rx); x <= cx + rx; x++) {
+          const dx = (x - cx) / (rx + 0.3), dy = (y - cy) / (ry + 0.3);
+          if (dx * dx + dy * dy <= 1) g.fillRect(x, y, 1, 1);
+        }
+      },
+      l(x0, y0, x1, y1, col) {
+        g.fillStyle = col;
+        const m = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+        for (let i = 0; i <= m; i++) g.fillRect(Math.round(x0 + (x1 - x0) * i / m), Math.round(y0 + (y1 - y0) * i / m), 1, 1);
+      }
+    };
+    draw(P, f, Math.sin(f / n * Math.PI * 2));
+    outlineSprite(c, '#0a0a0f');
+    frames.push(c);
+  }
+  return frames;
+}
+
+// mode 0 = dormant, 1 = awakening, 2 = rampage
+const sleeperSprite = (body, lite, dk, mode) => makeSprite(2, (P, f) => {
+  const sp = mode === 0 ? 2 : mode === 1 ? 3 + f : 5 + f;
+  for (let i = 0; i < 5; i++) { const x = 4 + i * 4 - (i > 2 ? 1 : 0); P.l(x, 7, x, 7 - sp + Math.abs(i - 2), dk); }
+  P.e(11.5, 13, 9, 7 + (mode === 0 ? f : 0), body);
+  P.e(11.5, 11, 7, 4, lite);
+  for (const x of [7, 11, 16]) P.l(x, 8, x, 18, dk);
+  if (mode === 0) {
+    P.l(6, 15, 9, 15, '#0b1a2a');
+    P.l(14, 15, 17, 15, '#0b1a2a');
+    if (f) { P.r(19, 2, 3, 1, '#cfe8ff'); P.r(20, 3, 1, 1, '#cfe8ff'); P.r(19, 4, 3, 1, '#cfe8ff'); }
+  } else if (mode === 1) {
+    P.r(6, 14, 3, 1 + f, '#ffd24a');
+    P.r(14, 14, 3, 1 + f, '#ffd24a');
+  } else {
+    P.r(6, 13, 3, 2, '#fff36b'); P.r(14, 13, 3, 2, '#fff36b');
+    P.r(7, 13 + f, 1, 1, '#330000'); P.r(15, 13 + f, 1, 1, '#330000');
+    P.r(8, 17, 8, 3, '#1a0204');
+    for (let x = 8; x < 16; x += 2) P.r(x, 17, 1, 1, '#ffffff');
+  }
+});
+
+const SPR = {
+  players: [
+    // 0: boy in a red cap and grey hoodie
+    makeSprite(2, (P, f) => {
+      P.r(8 + f, 20, 3, 3, '#1d1f27'); P.r(13 - f, 20, 3, 3, '#1d1f27');
+      P.r(8 + f, 22, 3, 1, '#0d0d12'); P.r(13 - f, 22, 3, 1, '#0d0d12');
+      P.r(7, 13, 10, 8, '#4a4f5a'); P.r(8, 13, 8, 2, '#5b616e'); P.r(11, 15, 2, 5, '#3a3f49');
+      P.r(5, 14 + f, 2, 5, '#3f444e'); P.r(17, 15 - f, 2, 5, '#3f444e');
+      P.r(5, 19 + f, 2, 1, '#cdbcae'); P.r(17, 20 - f, 2, 1, '#cdbcae');
+      P.e(11.5, 9, 4, 4, '#cdbcae');
+      P.r(9, 9, 2, 2, '#101014'); P.r(13, 9, 2, 2, '#101014'); P.r(10, 12, 3, 1, '#7a6a62');
+      P.e(11.5, 5, 5, 3, '#6b1f26'); P.r(6, 6, 11, 2, '#6b1f26'); P.r(5, 7, 9, 1, '#4a1419'); P.r(11, 3, 2, 1, '#8a2a33');
+    }),
+    // 1: pale boy with messy dark hair, striped jumper and a red scarf
+    makeSprite(2, (P, f) => {
+      P.r(8 + f, 20, 3, 3, '#2a2320'); P.r(13 - f, 20, 3, 3, '#2a2320');
+      P.r(8 + f, 22, 3, 1, '#0d0d12'); P.r(13 - f, 22, 3, 1, '#0d0d12');
+      P.r(7, 13, 10, 8, '#2f4a4a');
+      for (const y of [16, 19]) P.r(7, y, 10, 1, '#1b2e2e');
+      P.r(5, 14 + f, 2, 5, '#2a4242'); P.r(17, 15 - f, 2, 5, '#2a4242');
+      P.r(5, 19 + f, 2, 1, '#d6c9bd'); P.r(17, 20 - f, 2, 1, '#d6c9bd');
+      P.e(11.5, 9, 4, 4, '#d6c9bd');
+      P.r(9, 9, 2, 2, '#101014'); P.r(13, 9, 2, 2, '#101014'); P.r(11, 12, 2, 1, '#7a6a62');
+      P.e(11.5, 5, 5, 3, '#17151c'); P.r(6, 6, 2, 4, '#17151c'); P.r(16, 6, 2, 3, '#17151c');
+      P.r(8, 2, 2, 1, '#17151c'); P.r(12, 1, 2, 2, '#17151c'); P.r(15, 3, 2, 1, '#17151c'); P.r(10, 7, 1, 1, '#17151c');
+      P.r(7, 13, 10, 2, '#8a2a2a'); P.r(15, 15, 2, 4 + f, '#8a2a2a');
+    })
+  ],
+  listener: makeSprite(4, (P, f, s) => {
+    const t = Math.round(s);
+    P.e(5, 6 + t, 3, 5, '#7d1823'); P.e(5, 6 + t, 1, 3, '#ff8a8a');
+    P.e(18, 6 - t, 3, 5, '#7d1823'); P.e(18, 6 - t, 1, 3, '#ff8a8a');
+    P.e(11.5, 14, 8, 7, '#b3202e'); P.e(11.5, 12, 5, 3, '#d8404a');
+    P.l(7, 12, 9, 12, '#3a060b'); P.l(14, 12, 16, 12, '#3a060b');
+    P.r(8, 16, 8, 3, '#2a0508');
+    for (let x = 8; x < 16; x += 2) { P.r(x, 16, 1, 1, '#ffffff'); P.r(x + 1, 18, 1, 1, '#ffffff'); }
+    P.r(5 + (f % 2), 20, 3, 2, '#7d1823'); P.r(15 - (f % 2), 20, 3, 2, '#7d1823');
+  }),
+  drifter: makeSprite(4, (P, f, s) => {
+    const b = Math.round(s);
+    for (let i = 0; i < 4; i++) for (let y = 13; y < 22; y++) {
+      P.r(7 + i * 3 + Math.round(Math.sin(f * 1.57 + y * 0.9 + i)), y + b, 1, 1, y < 18 ? '#e0607a' : '#a03a55');
+    }
+    P.e(11.5, 9 + b, 7, 6, '#ff8fa3'); P.e(9, 7 + b, 3, 2, '#ffd0d8');
+    P.r(8, 10 + b, 2, 2, '#3a0a18'); P.r(13, 10 + b, 2, 2, '#3a0a18');
+  }),
+  sleeper: [
+    sleeperSprite('#2f6fa8', '#4f93cf', '#173e63', 0),
+    sleeperSprite('#c96a1e', '#e89040', '#7a3a0c', 1),
+    sleeperSprite('#c21f1f', '#e84a3a', '#6b0c0c', 2)
+  ],
+  mimic: makeSprite(4, (P, f) => {
+    for (let i = 0; i < 4; i++) for (let y = 17; y < 23; y++) P.r(6 + i * 4 + Math.round(Math.sin(f * 1.57 + y + i)), y, 1, 1, '#6b1d44');
+    P.e(11.5, 13, 8, 8, '#3b1026');
+    const h = f % 2 ? 2 : 0;
+    P.e(3 + h, 14, 2, 2, '#d9c9d9'); P.e(20 - h, 14, 2, 2, '#d9c9d9');
+    P.e(11.5, 11, 5, 6, '#eaf2ff');
+    if (f === 3) P.l(10, 10, 13, 10, '#3b1026');
+    else { P.e(11.5, 10, 2, 2, '#ff3b3b'); P.r(11, 10, 1, 1, '#220000'); }
+    for (let x = 9; x <= 14; x++) P.r(x, 14 + (x % 2), 1, 1, '#3b1026');
+  }),
+  wizard: makeSprite(2, (P, f) => {
+    P.l(20, 5, 20, 22, '#8b5a2b'); P.e(20, 3 - f, 2, 2, '#7df9ff'); P.r(20, 3 - f, 1, 1, '#ffffff');
+    for (let y = 11; y < 22; y++) { const w = 3 + (y - 11) * 0.45; P.r(11.5 - w, y, w * 2 + 1, 1, y === 21 ? '#f2c94c' : '#6a3fb5'); }
+    P.r(16, 13, 4, 2, '#6a3fb5'); P.r(19, 13, 2, 2, '#f0c8a0');
+    P.e(11.5, 8, 3, 2, '#f0c8a0'); P.r(10, 8, 1, 1, '#222222'); P.r(13, 8, 1, 1, '#222222');
+    P.e(11.5, 12, 3, 3, '#f4f4f4'); P.r(11, 15, 2, 2, '#f4f4f4');
+    for (let y = 0; y < 6; y++) P.r(11.5 - y * 0.6, y, y * 1.2 + 1, 1, '#4b2a8f');
+    P.r(5, 6, 14, 1, '#4b2a8f'); P.r(11, 3, 1, 1, '#f2c94c');
+  }),
+  exit: makeSprite(2, (P, f) => {
+    P.e(11.5, 12, 10, 10, '#0b1a1f');
+    P.r(4, 5, 16, 3, '#8fd0dc'); P.r(6, 9, 12, 3, '#5a9aa8'); P.r(8, 13, 8, 3, '#3a6d78'); P.r(10, 17, 4, 2, '#22444c');
+    if (f) P.r(4, 5, 16, 1, '#d8f8ff');
+  }),
+  note: makeSprite(1, P => {
+    P.r(6, 4, 12, 16, '#f1e2b8'); P.r(16, 4, 2, 2, '#c9b783');
+    for (const y of [8, 11, 14]) P.l(8, y, 15, y, '#8a7350');
+    P.r(14, 16, 3, 3, '#b3202e');
+  }),
+  pebble: makeSprite(1, P => { P.e(11.5, 12, 4, 3, '#9aa3ad'); P.r(10, 10, 2, 1, '#dfe5ec'); P.r(12, 14, 2, 1, '#6b737c'); }),
+  chime: makeSprite(2, (P, f) => {
+    P.r(3, 2, 18, 2, '#8b5a2b'); P.r(3, 2, 2, 20, '#8b5a2b'); P.r(19, 2, 2, 20, '#8b5a2b');
+    P.r(11, 4, 2, 3, '#555555');
+    P.e(11.5 + f, 11, 4, 5, '#d4a24c'); P.r(6 + f, 15, 12, 2, '#b07f2c'); P.r(10 + f, 8, 2, 4, '#f6d98a'); P.r(11 - f, 17, 2, 3, '#6b4a1a');
+  }),
+  door: makeSprite(2, (P, f) => {
+    if (!f) {
+      P.r(0, 0, 16, 16, '#4a5560'); P.r(1, 1, 14, 14, '#687682'); P.r(7, 0, 2, 16, '#2b333a');
+      for (const y of [3, 12]) { P.r(2, y, 4, 1, '#2b333a'); P.r(10, y, 4, 1, '#2b333a'); }
+      P.e(7.5, 7.5, 2, 2, '#ff6060'); P.r(7, 7, 2, 2, '#ffd0d0');
+    } else {
+      P.r(0, 0, 3, 16, '#4a5560'); P.r(13, 0, 3, 16, '#4a5560'); P.r(2, 0, 1, 16, '#96ffc8'); P.r(13, 0, 1, 16, '#96ffc8');
+    }
+  }, 16),
+  crack: makeSprite(1, P => {
+    P.l(4, 1, 7, 5, '#ffeaa7'); P.l(7, 5, 6, 9, '#ffeaa7'); P.l(6, 9, 10, 14, '#ffeaa7'); P.l(7, 5, 11, 4, '#ffeaa7'); P.l(6, 9, 3, 12, '#ffeaa7');
+  }, 16),
+  phosphor: makeSprite(2, (P, f) => {
+    P.r(8, 5, 8, 2, '#8b5a2b'); P.r(7, 7, 10, 13, '#bfe8d8'); P.r(8, 11, 8, 8, '#6dff9a'); P.r(8, 8, 1, 10, '#ffffff');
+    P.r(10 + f * 3, 13 - f, 1, 1, '#ffffff'); P.r(13 - f * 2, 16, 1, 1, '#eaffef');
+  }),
+  soles: makeSprite(1, P => {
+    for (const x of [4, 13]) { P.r(x, 6, 4, 10, '#7a5234'); P.r(x, 14, 7, 4, '#7a5234'); P.r(x, 18, 7, 1, '#d9c6a0'); P.r(x, 6, 4, 1, '#a87a50'); }
+  }),
+  crystal: makeSprite(2, (P, f) => {
+    for (let y = 3; y < 21; y++) {
+      const w = y < 9 ? y - 2 : Math.max(0, (21 - y) * 0.55);
+      P.r(11.5 - w, y, w * 2 + 1, 1, '#35b8dc'); P.r(11.5 - w, y, w + 0.5, 1, '#7df9ff');
+    }
+    P.l(9, 6, 8, 12, '#eaffff');
+    if (f) P.r(14, 5, 1, 1, '#ffffff');
+  }),
+  satchel: makeSprite(1, P => {
+    P.l(6, 9, 11, 3, '#5a3415'); P.l(17, 9, 12, 3, '#5a3415');
+    P.e(11.5, 14, 7, 6, '#8b5a2b'); P.r(5, 9, 14, 4, '#6b3f1a'); P.r(11, 12, 2, 2, '#f2c94c');
+  })
+};
+
+function drawSprite(frames, x, y, size, a = 1, fps = 6, off = 0) {
+  if (a < 0.01) return;
+  ctx.imageSmoothingEnabled = false;
+  ctx.globalAlpha = Math.min(1, a);
+  ctx.drawImage(frames[Math.floor(time * fps + off) % frames.length], x - size / 2, y - size / 2, size, size);
+  ctx.globalAlpha = 1;
+}
+
 function drawFaces() {
   const hw = W / 2 / ZOOM, hh = H / 2 / ZOOM;
   const x0 = Math.max(0, Math.floor((cam.x - hw) / T) - 1);
   const x1 = Math.min(lv.gw - 1, Math.ceil((cam.x + hw) / T) + 1);
   const y0 = Math.max(0, Math.floor((cam.y - hh) / T) - 1);
   const y1 = Math.min(lv.gh - 1, Math.ceil((cam.y + hh) / T) + 1);
+  const th = THEMES[themeOf()], full = lightMode || lv.cfg.safe;
 
-  // Distinct wall luminescence colors per environment
-  let wallColor = '#e6eeff';
-  if (lv.cfg.surf === SURF_METAL) wallColor = '#c8f0ff';
-  else if (lv.cfg.surf === SURF_WATER) wallColor = '#a8e0f5';
-  else if (lv.cfg.surf === SURF_SOFT) wallColor = '#d2f0d0';
-
-  ctx.strokeStyle = wallColor;
-  ctx.lineWidth = 1.6;
   ctx.lineCap = 'round';
-
+  ctx.lineJoin = 'round';
   for (let ty = y0; ty <= y1; ty++) {
     for (let tx = x0; tx <= x1; tx++) {
       const base = (ty * lv.gw + tx) * 4;
       for (let d = 0; d < 4; d++) {
         let m = lv.face[base + d];
-        if (lightMode && !isWallT(tx + DIRS[d][0], ty + DIRS[d][1])) m = Math.max(m, 0.7);
+        if (full && isWallT(tx, ty) && !isWallT(tx + DIRS[d][0], ty + DIRS[d][1])) m = Math.max(m, 0.7);
         if (m < 0.01) continue;
 
-        ctx.globalAlpha = Math.min(1, m * 0.85);
-        ctx.beginPath();
+        // the two ends of this wall edge, and the direction pointing into the wall
         const X = tx * T, Y = ty * T;
-        if (d === 0) { ctx.moveTo(X + T, Y); ctx.lineTo(X + T, Y + T); }
-        else if (d === 1) { ctx.moveTo(X, Y); ctx.lineTo(X, Y + T); }
-        else if (d === 2) { ctx.moveTo(X, Y + T); ctx.lineTo(X + T, Y + T); }
-        else { ctx.moveTo(X, Y); ctx.lineTo(X + T, Y); }
-        ctx.stroke();
+        let ax = X, ay = Y, bx = X, by = Y + T, nx = 1, ny = 0;
+        if (d === 0) { ax = bx = X + T; nx = -1; }
+        else if (d === 2) { ay = by = Y + T; bx = X + T; nx = 0; ny = -1; }
+        else if (d === 3) { bx = X + T; by = Y; nx = 0; ny = 1; }
+        drawFace(th, ax, ay, bx, by, nx, ny, Math.min(1, m * 0.85), tx * 31 + ty * 17 + d * 7);
       }
     }
   }
   ctx.globalAlpha = 1;
+}
+
+const hash01 = n => { const v = Math.sin(n * 127.1) * 43758.5453; return v - Math.floor(v); };
+
+function drawFace(th, ax, ay, bx, by, nx, ny, a, seed) {
+  // a point t of the way along the edge, pushed `off` pixels into the wall
+  const at = (t, off) => [ax + (bx - ax) * t + nx * off, ay + (by - ay) * t + ny * off];
+  ctx.globalAlpha = a;
+  ctx.strokeStyle = th.edge;
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+
+  if (th.style === 'rock') {
+    ctx.moveTo(ax, ay);
+    for (let i = 1; i < 5; i++) { const [x, y] = at(i / 5, hash01(seed + i) * 4); ctx.lineTo(x, y); }
+    ctx.lineTo(bx, by);
+  } else if (th.style === 'hive') {
+    for (let i = 0; i < 2; i++) {
+      const [sx, sy] = at(i / 2, 0), [cx, cy] = at(i / 2 + 0.25, 5), [ex, ey] = at(i / 2 + 0.5, 0);
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(cx, cy, ex, ey);
+    }
+  } else {
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    if (th.style === 'brick') {
+      for (let i = 1; i < 4; i++) { const [sx, sy] = at(i / 4, 0), [ex, ey] = at(i / 4, 3.5); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); }
+    }
+  }
+  ctx.stroke();
+
+  if (th.wires) {
+    const steel = th.style === 'steel';
+    th.wires.forEach((col, k) => {
+      const off = 3.5 + k * 2.2;
+      const [sx, sy] = at(0, off), [cx, cy] = at(0.5, off + (steel ? 2 : 0)), [ex, ey] = at(1, off);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.1;
+      ctx.globalAlpha = a * (steel ? 0.8 : 0.55 + 0.35 * Math.sin(time * 3 + seed));
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(cx, cy, ex, ey);
+      ctx.stroke();
+    });
+    if (steel) {
+      ctx.globalAlpha = a;
+      ctx.fillStyle = th.edge;
+      for (const t of [0.15, 0.85]) { const [rx, ry] = at(t, 1.8); ctx.fillRect(rx - 0.8, ry - 0.8, 1.6, 1.6); }
+    }
+  }
 }
 
 function drawGlow(x, y, r, color, a) {
@@ -1646,124 +2041,57 @@ function drawGlow(x, y, r, color, a) {
 }
 
 function drawInteractiveObjects() {
-  // 1. Exit Portal
-  const nearExit = clamp(1 - Math.hypot(player.x - lv.exit.x, player.y - lv.exit.y) / 75, 0, 1);
-  const exitA = lightMode ? 1 : Math.max(lv.exitSeen, nearExit);
+  const near = (o, dist) => clamp(1 - Math.hypot(player.x - o.x, player.y - o.y) / dist, 0, 1);
+  const full = lightMode || lv.cfg.safe;
+
+  // 1. Exit stairs
+  const exitA = full ? 1 : Math.max(lv.exitSeen, near(lv.exit, 75));
   if (exitA > 0.01) {
-    const p = 0.75 + 0.25 * Math.sin(time * 3);
-    drawGlow(lv.exit.x, lv.exit.y, 32 * p, '235,245,255', 0.45 * exitA);
-    ctx.globalAlpha = exitA;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(lv.exit.x, lv.exit.y - 8);
-    ctx.lineTo(lv.exit.x + 8, lv.exit.y);
-    ctx.lineTo(lv.exit.x, lv.exit.y + 8);
-    ctx.lineTo(lv.exit.x - 8, lv.exit.y);
-    ctx.closePath();
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    drawGlow(lv.exit.x, lv.exit.y, 32 * (0.75 + 0.25 * Math.sin(time * 3)), '160,235,255', 0.4 * exitA);
+    drawSprite(SPR.exit, lv.exit.x, lv.exit.y, 28, exitA, 2);
   }
 
-  // 2. Story Lore Note
+  // 2. Story note
   if (lv.note && (!lv.noteTaken || lv.noteSeen > 0.01)) {
-    const nearNote = clamp(1 - Math.hypot(player.x - lv.note.x, player.y - lv.note.y) / 50, 0, 1);
-    const noteA = lv.noteTaken ? lv.noteSeen * 0.4 : lightMode ? 1 : Math.max(lv.noteSeen, nearNote);
-    if (noteA > 0.01) {
-      drawGlow(lv.note.x, lv.note.y, 18, '255,250,235', 0.35 * noteA);
-      ctx.globalAlpha = noteA;
-      ctx.strokeStyle = '#fffaf0';
-      ctx.lineWidth = 1.1;
-      ctx.strokeRect(lv.note.x - 4, lv.note.y - 5, 8, 10);
-      ctx.beginPath();
-      ctx.moveTo(lv.note.x - 2, lv.note.y - 2); ctx.lineTo(lv.note.x + 2, lv.note.y - 2);
-      ctx.moveTo(lv.note.x - 2, lv.note.y + 1); ctx.lineTo(lv.note.x + 2, lv.note.y + 1);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+    const a = lv.noteTaken ? lv.noteSeen * 0.4 : full ? 1 : Math.max(lv.noteSeen, near(lv.note, 50));
+    if (a > 0.01) {
+      drawGlow(lv.note.x, lv.note.y, 18, '255,250,235', 0.3 * a);
+      drawSprite(SPR.note, lv.note.x, lv.note.y, 20, a);
     }
   }
 
-  // 3. Resonance Chime
+  // 3. Resonance chime
   if (lv.chime) {
-    const nearChime = clamp(1 - Math.hypot(player.x - lv.chime.x, player.y - lv.chime.y) / 60, 0, 1);
-    const chimeA = lightMode ? 1 : Math.max(nearChime, lv.chime.ringing > 0 ? 0.9 : 0.3);
-    if (chimeA > 0.01) {
-      const ringGlow = lv.chime.ringing > 0 ? (0.5 + 0.3 * Math.sin(time * 15)) : 0;
-      drawGlow(lv.chime.x, lv.chime.y, 22 + ringGlow * 10, '255,220,130', (0.2 + ringGlow) * chimeA);
-      ctx.globalAlpha = chimeA;
-      ctx.strokeStyle = '#ffe894';
-      ctx.lineWidth = 1.3;
-      ctx.beginPath();
-      // Bell silhouette
-      ctx.arc(lv.chime.x, lv.chime.y - 2, 6, Math.PI, 0);
-      ctx.lineTo(lv.chime.x + 8, lv.chime.y + 6);
-      ctx.lineTo(lv.chime.x - 8, lv.chime.y + 6);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(lv.chime.x, lv.chime.y + 7, 2, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffe894';
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
+    const ring = lv.chime.ringing > 0;
+    const a = full ? 1 : Math.max(near(lv.chime, 60), ring ? 0.9 : 0.3);
+    const rg = ring ? 0.5 + 0.3 * Math.sin(time * 15) : 0;
+    drawGlow(lv.chime.x, lv.chime.y, 22 + rg * 10, '255,220,130', (0.2 + rg) * a);
+    drawSprite(SPR.chime, lv.chime.x, lv.chime.y, 26, a, ring ? 12 : 0);
   }
 
-  // 4. Acoustic Sealed Bulkhead Door
+  // 4. Sealed door
   if (lv.door) {
-    const nearDoor = clamp(1 - Math.hypot(player.x - lv.door.x, player.y - lv.door.y) / 65, 0, 1);
-    const doorA = lightMode ? 1 : Math.max(nearDoor, lv.door.seen);
-    if (doorA > 0.01) {
-      ctx.globalAlpha = doorA;
-      if (lv.door.open) {
-        ctx.strokeStyle = 'rgba(150,255,200,0.5)';
-        ctx.strokeRect(lv.door.x - T / 2 + 3, lv.door.y - T / 2 + 3, T - 6, T - 6);
-      } else {
-        ctx.fillStyle = 'rgba(80,10,10,0.6)';
-        ctx.fillRect(lv.door.x - T / 2 + 2, lv.door.y - T / 2 + 2, T - 4, T - 4);
-        ctx.strokeStyle = '#ff6060';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(lv.door.x - T / 2 + 2, lv.door.y - T / 2 + 2, T - 4, T - 4);
-        // Acoustic lock rune
-        ctx.beginPath();
-        ctx.moveTo(lv.door.x - 5, lv.door.y); ctx.lineTo(lv.door.x + 5, lv.door.y);
-        ctx.moveTo(lv.door.x, lv.door.y - 5); ctx.lineTo(lv.door.x, lv.door.y + 5);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-    }
+    const a = full ? 1 : Math.max(near(lv.door, 65), lv.door.seen);
+    drawSprite([SPR.door[lv.door.open ? 1 : 0]], lv.door.x, lv.door.y, T, a);
   }
 
-  // 5. Secret Wall Fissure
+  // 5. Cracked secret wall
   if (lv.secretWall && !lv.secretWall.broken && lv.secretWall.seen > 0.05) {
-    ctx.globalAlpha = lv.secretWall.seen * 0.7;
-    ctx.strokeStyle = '#ffeaa7';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    // Cracked fissure pattern
-    ctx.moveTo(lv.secretWall.x - 6, lv.secretWall.y - 8);
-    ctx.lineTo(lv.secretWall.x - 1, lv.secretWall.y - 2);
-    ctx.lineTo(lv.secretWall.x + 4, lv.secretWall.y + 2);
-    ctx.lineTo(lv.secretWall.x + 2, lv.secretWall.y + 9);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    drawSprite(SPR.crack, lv.secretWall.x, lv.secretWall.y, T, lv.secretWall.seen * 0.8);
   }
 
-  // 6. Upgrade Artifact Item
-  if (lv.upgradeItem && !lv.upgradeItem.taken && (lightMode || lv.upgradeItem.seen > 0.05)) {
-    const a = lightMode ? 1 : lv.upgradeItem.seen;
-    drawGlow(lv.upgradeItem.x, lv.upgradeItem.y, 20, '150,220,255', 0.4 * a);
-    ctx.globalAlpha = a;
-    ctx.strokeStyle = '#8ee6ff';
-    ctx.lineWidth = 1.4;
-    // Diamond artifact rune
-    ctx.beginPath();
-    ctx.moveTo(lv.upgradeItem.x, lv.upgradeItem.y - 6);
-    ctx.lineTo(lv.upgradeItem.x + 6, lv.upgradeItem.y);
-    ctx.lineTo(lv.upgradeItem.x, lv.upgradeItem.y + 6);
-    ctx.lineTo(lv.upgradeItem.x - 6, lv.upgradeItem.y);
-    ctx.closePath();
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+  // 6. Upgrade artifact
+  const u = lv.upgradeItem;
+  if (u && !u.taken && (full || u.seen > 0.05)) {
+    const a = full ? 1 : u.seen;
+    drawGlow(u.x, u.y, 20, '150,220,255', 0.4 * a);
+    drawSprite(SPR[u.id], u.x, u.y, 22, a, 3);
+  }
+
+  // 7. The wizard
+  if (lv.wizard) {
+    drawGlow(lv.wizard.x, lv.wizard.y - 12, 46, '125,249,255', 0.25 + 0.05 * Math.sin(time * 2));
+    drawSprite(SPR.wizard, lv.wizard.x, lv.wizard.y, 40, 1, 2);
   }
 }
 
@@ -1781,102 +2109,17 @@ function drawMarks() {
 
 function drawEnemyShape(e, x, y, a) {
   if (a < 0.01) return;
-  ctx.globalAlpha = a;
-
-  // 1. The Listener
-  if (e.type === 'listener') {
-    drawGlow(x, y, 26, '255,40,40', 0.38);
-    ctx.globalAlpha = a;
-    ctx.strokeStyle = '#ff3b3b';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    for (let k = 0; k <= 14; k++) {
-      const ang = (k / 14) * Math.PI * 2;
-      const rr = e.r + (k % 2 ? 3 : -1) + Math.sin(time * 6 + k) * 1.3;
-      const px = x + Math.cos(ang) * rr, py = y + Math.sin(ang) * rr;
-      k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
-    }
-    ctx.stroke();
-    // Auditory feelers
-    for (let f = -1; f <= 1; f += 2) {
-      const fa = e.feelers + f * 0.7;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + Math.cos(fa) * (e.r + 7), y + Math.sin(fa) * (e.r + 7));
-      ctx.stroke();
-    }
-    ctx.fillStyle = '#ff3b3b';
-    ctx.beginPath();
-    ctx.arc(x, y, 2.8, 0, Math.PI * 2);
-    ctx.fill();
+  let frames = SPR[e.type], glow = '255,40,40', fps = 6;
+  if (e.type === 'sleeper') {
+    const st = e.sleepState === 'rampage' ? 2 : e.sleepState === 'awakening' ? 1 : 0;
+    frames = SPR.sleeper[st];
+    glow = st === 2 ? '255,30,30' : st === 1 ? '255,120,40' : '80,180,255';
+    fps = st === 2 ? 10 : st === 1 ? 6 : 1;
+  } else if (e.type === 'drifter') {
+    glow = '255,120,150';
   }
-  // 2. The Drifter
-  else if (e.type === 'drifter') {
-    drawGlow(x, y, 20, '255,80,80', 0.3);
-    ctx.fillStyle = '#ff6060';
-    for (let k = 0; k < 4; k++) {
-      const ang = e.motePhase + k * 1.57;
-      ctx.beginPath();
-      ctx.arc(x + Math.cos(ang) * 6, y + Math.sin(ang) * 6, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.strokeStyle = 'rgba(255,100,100,0.6)';
-    ctx.beginPath();
-    ctx.arc(x, y, 4, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  // 3. The Sleeper
-  else if (e.type === 'sleeper') {
-    const isRampage = e.sleepState === 'rampage';
-    const isAwakening = e.sleepState === 'awakening';
-    const glowColor = isRampage ? '255,30,30' : isAwakening ? '255,120,40' : '80,180,255';
-    drawGlow(x, y, 32, glowColor, (isRampage ? 0.5 : 0.25) * a);
-
-    ctx.globalAlpha = a;
-    ctx.strokeStyle = isRampage ? '#ff3030' : isAwakening ? '#ff8c30' : '#6bc5ff';
-    ctx.lineWidth = 1.6;
-
-    // Coiled armored carapace
-    ctx.beginPath();
-    ctx.arc(x, y, e.r, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Spines / Crystalline ridges
-    const spines = 8;
-    for (let k = 0; k < spines; k++) {
-      const sa = (k / spines) * Math.PI * 2 + time * (isRampage ? 4 : 0.5);
-      const sr = e.r + (isRampage ? 5 : 2);
-      ctx.beginPath();
-      ctx.moveTo(x + Math.cos(sa) * e.r, y + Math.sin(sa) * e.r);
-      ctx.lineTo(x + Math.cos(sa) * sr, y + Math.sin(sa) * sr);
-      ctx.stroke();
-    }
-
-    // Glowing Eye slits
-    if (e.eyeOpen > 0.05 || isRampage) {
-      ctx.fillStyle = isRampage ? '#ff1010' : '#ffaa30';
-      ctx.beginPath();
-      ctx.arc(x - 3, y - 1, 1.8 * (isRampage ? 1 : e.eyeOpen), 0, Math.PI * 2);
-      ctx.arc(x + 3, y - 1, 1.8 * (isRampage ? 1 : e.eyeOpen), 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  // 4. The Mimic
-  else {
-    drawGlow(x, y, 22, '255,40,40', 0.32);
-    ctx.globalAlpha = a;
-    ctx.strokeStyle = '#ff3b3b';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.arc(x, y, e.r, 0, Math.PI * 2);
-    ctx.stroke();
-    // Inner false mimic pupil
-    ctx.fillStyle = '#eaf2ff';
-    ctx.beginPath();
-    ctx.arc(x, y, 4, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
+  drawGlow(x, y, e.r * 2.3, glow, 0.3 * a);
+  drawSprite(frames, x, y, e.r * 3, a, fps, e.r);
 }
 
 function drawBar(e, x, y, a) {
@@ -1941,17 +2184,9 @@ function drawPlayer() {
   const sneak = isSneaking();
   drawGlow(player.x, player.y, (sneak ? 20 : 30) + b * 6, '200,220,255', (sneak ? 0.12 : 0.2) + b * 0.06);
 
-  ctx.fillStyle = '#eaf2ff';
-  ctx.beginPath();
-  ctx.arc(player.x, player.y, sneak ? 3.5 : 4.5, 0, Math.PI * 2);
-  ctx.fill();
+  drawSprite(SPR.players[save.settings.character ? 1 : 0], player.x, player.y, sneak ? 21 : 25, 1, playerLoud ? 8 : 0);
 
-  for (const p of flying) {
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 2.0, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-  }
+  for (const p of flying) drawSprite(SPR.pebble, p.x, p.y, 14);
 }
 
 function spaced(s) {
@@ -1994,6 +2229,7 @@ function render() {
   ctx.setTransform(DPR * ZOOM, 0, 0, DPR * ZOOM, DPR * (W / 2 + sx - cam.x * ZOOM), DPR * (H / 2 + sy - cam.y * ZOOM));
 
   if (lv) {
+    drawTiles();
     drawFaces();
     drawInteractiveObjects();
   }
@@ -2176,6 +2412,7 @@ function drawUI() {
       `AMBIENCE VOLUME: ${Math.round(save.settings.ambVol * 100)}%`,
       `SCREEN SHAKE: ${save.settings.screenShake ? 'ENABLED' : 'DISABLED'}`,
       `CRT SCANLINE EFFECT: ${save.settings.crtEffect ? 'ENABLED' : 'DISABLED'}`,
+      `CHARACTER: ${save.settings.character ? 'BOY WITH THE RED SCARF' : 'BOY IN THE RED CAP'}`,
       'BACK TO TITLE'
     ];
 
@@ -2184,6 +2421,10 @@ function drawUI() {
       const col = isSel ? '255,235,160' : '220,230,250';
       text(`${isSel ? '› ' : ''}${opt}${isSel ? ' ‹' : ''}`, cx, H * 0.36 + k * 36, `15px ${MONO}`, isSel ? 0.95 : 0.65, col);
     });
+
+    // preview of the chosen character
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(SPR.players[save.settings.character ? 1 : 0][Math.floor(time * 3) % 2], cx - 40, H * 0.36 + 7 * 36 - 6, 80, 80);
 
     text('UP / DOWN to navigate  ·  LEFT / RIGHT to adjust  ·  ESC to return', cx, H - 54, `13px ${MONO}`, 0.45);
     drawToast();
@@ -2243,29 +2484,52 @@ function drawUI() {
   }
 
   // --- In-Game HUD ---
-  const depthLabel = mode === 'story' ? `DEPTH ${levelIdx + 1}: ${LEVELS[levelIdx].name.toUpperCase()}` : `ENDLESS DEPTH ${endlessRound}`;
+  const depthLabel = lv && lv.cfg.wizard ? lv.cfg.name.toUpperCase() : mode === 'story' ? `DEPTH ${levelIdx + 1}: ${LEVELS[levelIdx].name.toUpperCase()}` : `ENDLESS DEPTH ${endlessRound}`;
   text(spaced(depthLabel), 22, 26, `12px ${MONO}`, 0.45, '255,255,255', 'left');
 
   if (sneakToggle) text(spaced('SNEAKING'), 22, 46, `11px ${MONO}`, 0.45, '255,255,255', 'left');
 
-  // Active Artifacts
-  if (save.upgrades.length > 0) {
-    const upStr = save.upgrades.map(u => u.toUpperCase()).join(' · ');
-    text(spaced(`ARTIFACTS: ${upStr}`), 22, sneakToggle ? 66 : 46, `10px ${MONO}`, 0.35, '150,220,255', 'left');
+  // Equipped items: icons in the bottom-left corner. Hover one to see what it does.
+  let hovered = null;
+  ctx.imageSmoothingEnabled = false;
+  save.upgrades.forEach((id, k) => {
+    const up = UPGRADES.find(u => u.id === id);
+    if (!up || !SPR[id]) return;
+    const x = 22 + k * 48, y = H - 64;
+    const hover = mouseX >= x && mouseX < x + 42 && mouseY >= y && mouseY < y + 42;
+    if (hover) hovered = up;
+    ctx.fillStyle = hover ? 'rgba(40,60,80,0.92)' : 'rgba(10,14,22,0.78)';
+    ctx.fillRect(x, y, 42, 42);
+    ctx.strokeStyle = hover ? 'rgba(150,220,255,0.95)' : 'rgba(150,220,255,0.35)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, 41, 41);
+    ctx.drawImage(SPR[id][0], x + 5, y + 5, 32, 32);
+  });
+  if (hovered) {
+    ctx.font = `12px ${MONO}`;
+    const lines = wrap(hovered.desc, Math.min(330, W - 68));
+    const bw = Math.min(360, W - 44), bh = 38 + lines.length * 18, by = H - 74 - bh;
+    ctx.fillStyle = 'rgba(8,12,20,0.94)';
+    ctx.fillRect(22, by, bw, bh);
+    ctx.strokeStyle = 'rgba(150,220,255,0.6)';
+    ctx.strokeRect(22.5, by + 0.5, bw - 1, bh - 1);
+    text(spaced(hovered.name.toUpperCase()), 36, by + 20, `12px ${MONO}`, 0.95, '150,220,255', 'left');
+    lines.forEach((l, k) => text(l, 36, by + 42 + k * 18, `12px ${MONO}`, 0.85, '255,255,255', 'left'));
   }
 
   // Dev tags
   const dev = [lightMode && 'LIGHT', hasGun && 'GUN', godMode && 'GOD'].filter(Boolean);
   if (dev.length) text(spaced('DEV: ' + dev.join(' · ')), 22, 86, `11px ${MONO}`, 0.45, '255,220,160', 'left');
 
+  // The wizard's cave shows your experience instead of pebbles
+  if (lv && lv.wizard) {
+    text(spaced(`EXPERIENCE  ${save.xp}`), W - 22, 26, `12px ${MONO}`, 0.8, '242,201,76', 'right');
+  }
+
   // Pebbles HUD Counter
-  if (lv) {
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    for (let k = 0; k < lv.pebbles; k++) {
-      ctx.beginPath();
-      ctx.arc(W - 24 - k * 14, 26, 3.0, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  if (lv && !lv.wizard) {
+    ctx.imageSmoothingEnabled = false;
+    for (let k = 0; k < lv.pebbles; k++) ctx.drawImage(SPR.pebble[0], W - 35 - k * 14, 15, 22, 22);
     text('PEBBLES', W - 32 - lv.pebbles * 14, 26, `10px ${MONO}`, 0.35, '255,255,255', 'right');
   }
 
@@ -2797,7 +3061,7 @@ const COMMANDS = {
   // level <1-8>          jump to a story depth
   // level endless <n>    jump to an endless round
   level(a, b) {
-    const usage = `usage: level <1-${LEVELS.length}> or level endless <round>`;
+    const usage = `usage: level <1-${LEVELS.length}>, level wizard <1-2> or level endless <round>`;
     if (a === 'endless' || a === 'e') {
       const r = parseInt(b, 10);
       if (!(r >= 1)) return usage;
@@ -2806,9 +3070,18 @@ const COMMANDS = {
       startLevel(true);
       return `jumped to endless round ${r}`;
     }
+    if (a === 'wizard' || a === 'w') {
+      const w = parseInt(b, 10) === 2 ? 2 : 1;
+      mode = 'story';
+      wizardStop = w;
+      levelIdx = WIZARD_AFTER[w - 1];
+      startLevel(false);
+      return `jumped to the wizard's hollow (visit ${w})`;
+    }
     const n = parseInt(a, 10);
     if (!(n >= 1 && n <= LEVELS.length)) return usage;
     mode = 'story';
+    wizardStop = 0;
     levelIdx = n - 1;
     startLevel(false);
     return `jumped to depth ${n}: ${LEVELS[levelIdx].name}`;
@@ -2956,15 +3229,15 @@ window.addEventListener('keydown', e => {
       menuSelection = 6;
       persist();
     } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
-      menuSelection = (menuSelection - 1 + 6) % 6;
+      menuSelection = (menuSelection - 1 + 7) % 7;
     } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
-      menuSelection = (menuSelection + 1) % 6;
+      menuSelection = (menuSelection + 1) % 7;
     } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
       adjustSetting(menuSelection, -1);
     } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
       adjustSetting(menuSelection, 1);
     } else if (e.code === 'Enter' || e.code === 'Space') {
-      if (menuSelection === 5) {
+      if (menuSelection === 6) {
         state = 'title';
         menuSelection = 6;
         persist();
@@ -3026,11 +3299,15 @@ function triggerTitleMenu(idx) {
   if (idx === 0) { // Continue
     mode = 'story';
     levelIdx = Math.min(save.depth, LEVELS.length) - 1;
+    wizardStop = save.atWizard || 0;
+    if (wizardStop) levelIdx = WIZARD_AFTER[wizardStop - 1];
     startLevel(true);
   } else if (idx === 1) { // New Descent
     mode = 'story';
     levelIdx = 0;
+    wizardStop = 0;
     save.depth = 1;
+    save.atWizard = 0;
     persist();
     startLevel(true);
   } else if (idx === 2) { // Level Select
@@ -3066,6 +3343,8 @@ function adjustSetting(idx, dir) {
     save.settings.screenShake = !save.settings.screenShake;
   } else if (idx === 4) {
     save.settings.crtEffect = !save.settings.crtEffect;
+  } else if (idx === 5) {
+    save.settings.character = save.settings.character ? 0 : 1;
   }
   updateAudioSettings();
   persist();
