@@ -2677,7 +2677,7 @@ function updateHum() {
 function updateAmbientDrone() {
   if (!AC) return;
   if (ambDrone) {
-    ambDrone.gain.setTargetAtTime(0, AC.currentTime, 0.5);
+    ambDrone.gain.gain.setTargetAtTime(0, AC.currentTime, 0.5);
     ambDrone.oscs.forEach(o => o.stop(AC.currentTime + 1.0));
     ambDrone = null;
   }
