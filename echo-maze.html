@@ -2794,15 +2794,34 @@ const COMMANDS = {
     lv.pebbles += 5;
     return '+5 pebbles added';
   },
+  // level <1-8>          jump to a story depth
+  // level endless <n>    jump to an endless round
+  level(a, b) {
+    const usage = `usage: level <1-${LEVELS.length}> or level endless <round>`;
+    if (a === 'endless' || a === 'e') {
+      const r = parseInt(b, 10);
+      if (!(r >= 1)) return usage;
+      mode = 'endless';
+      endlessRound = r;
+      startLevel(true);
+      return `jumped to endless round ${r}`;
+    }
+    const n = parseInt(a, 10);
+    if (!(n >= 1 && n <= LEVELS.length)) return usage;
+    mode = 'story';
+    levelIdx = n - 1;
+    startLevel(false);
+    return `jumped to depth ${n}: ${LEVELS[levelIdx].name}`;
+  },
   help() {
     return 'commands: ' + Object.keys(COMMANDS).join(', ');
   }
 };
 
 function runCommand(raw) {
-  const cmd = raw.trim().toLowerCase();
+  const [cmd, ...args] = raw.trim().toLowerCase().split(/\s+/);
   if (!cmd) return;
-  consoleMsg = COMMANDS[cmd] ? COMMANDS[cmd]() : `unknown command: ${cmd} (type help)`;
+  consoleMsg = COMMANDS[cmd] ? COMMANDS[cmd](...args) : `unknown command: ${cmd} (type help)`;
   consoleMsgT = 4.5;
 }
 
