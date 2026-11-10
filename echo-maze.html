@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>ECHO MAZE</title>
 <style>
   html, body {
@@ -12,6 +12,9 @@
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
     font-family: ui-monospace, Menlo, Consolas, monospace;
     color: #e6eeff;
   }
@@ -19,7 +22,9 @@
     display: block;
     width: 100vw;
     height: 100vh;
+    height: 100dvh;
     cursor: crosshair;
+    touch-action: none;
   }
 </style>
 </head>
@@ -33,6 +38,7 @@
 // ============================================================================
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let W = 0, H = 0, DPR = 1, ZOOM = 1;
+let UIS = 1; // menus and HUD are drawn at this scale so they fit small phone screens
 
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
@@ -40,7 +46,8 @@ function resize() {
   H = window.innerHeight;
   cv.width = W * DPR;
   cv.height = H * DPR;
-  ZOOM = Math.max(0.75, Math.min(W, H) / 580);
+  ZOOM = Math.max(0.85, Math.min(W, H) / 580);
+  UIS = Math.max(0.6, Math.min(1, W / 560, H / 640));
 }
 window.addEventListener('resize', resize);
 resize();
@@ -475,22 +482,24 @@ let ambientSoundTimer = rand(3, 7);
 const keys = {};
 const tapUntil = {};
 const held = c => keys[c] || tapUntil[c] > time;
+
+// Touch controls: a thumb-stick on the left, buttons on the right
+let touchMode = false;
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+const JOY_R = 46;
 let sneakToggle = false;
-const isSneaking = () => !!keys.KeyC || sneakToggle;
+// pushing the thumb-stick only a little also sneaks
+const isSneaking = () => !!keys.KeyC || sneakToggle || (joy.id !== null && Math.hypot(joy.x, joy.y) < 0.55);
 
 function buildLevel(cfg, seed) {
   const rng = mulberry32(seed);
   const m = genMaze(cfg.cells[0], cfg.cells[1], rng);
 
-  // The wizard's cave: knock out every inner wall, then leave a few rock pillars
+  // The wizard's cave: knock out every inner wall so it is one plain open cavern
   if (cfg.wizard) {
     for (let y = 1; y < m.gh - 1; y++) for (let x = 1; x < m.gw - 1; x++) m.g[y * m.gw + x] = 0;
-    for (let k = 0; k < 14; k++) {
-      const x = 4 + 2 * Math.floor(rng() * ((m.gw - 8) / 2)), y = 4 + 2 * Math.floor(rng() * ((m.gh - 8) / 2));
-      if (Math.abs(x - m.gw / 2) > 2 || Math.abs(y - m.gh / 2) > 2) m.g[y * m.gw + x] = 1;
-    }
   }
-  
+
   lv = {
     ...m,
     cfg,
@@ -1444,7 +1453,7 @@ function update(dt) {
     return;
   }
 
-  if (state === 'pause' || consoleOpen || state === 'journal' || state === 'achievements' || state === 'settings' || state === 'level_select') {
+  if (state === 'pause' || consoleOpen || state === 'journal' || state === 'achievements' || state === 'settings' || state === 'level_select' || state === 'credits' || !lv) {
     return;
   }
 
@@ -1505,9 +1514,11 @@ function update(dt) {
   if (held('KeyD') || held('ArrowRight')) mx++;
   if (held('KeyW') || held('ArrowUp')) my--;
   if (held('KeyS') || held('ArrowDown')) my++;
+  mx += joy.x;
+  my += joy.y;
 
   const sneaking = isSneaking();
-  const moving = mx || my;
+  const moving = Math.hypot(mx, my) > 0.2;
 
   if (moving) {
     const l = Math.hypot(mx, my);
@@ -1733,11 +1744,22 @@ function tileset(theme) {
   return TILESETS[theme];
 }
 
+// Hand-made art in the assets folder: a wall strip for most levels, floor tiles for two.
+// Until an image has loaded (or if it is missing) the code-drawn look is used instead.
+const ART = {};
+function loadArt(key) {
+  const img = new Image();
+  img.onload = () => { ART[key] = img; };
+  img.src = `assets/${key}.png`;
+}
+for (const t of ['entrance', 'laboratory', 'flooded', 'collapsed', 'chasm', 'hive', 'heart']) loadArt(`wall_${t}`);
+for (const t of ['flooded', 'chasm']) for (let k = 0; k < 3; k++) loadArt(`floor_${t}_${k}`);
+
 const themeOf = () => (lv && THEMES[lv.cfg.theme]) ? lv.cfg.theme : 'entrance';
 
 // Floor tiles only: the paths. They stay dark until sound reaches them. Walls are left black.
 function drawTiles() {
-  const ts = tileset(themeOf());
+  const theme = themeOf(), ts = tileset(theme);
   const hw = W / 2 / ZOOM, hh = H / 2 / ZOOM;
   const x0 = Math.max(0, Math.floor((cam.x - hw) / T) - 1);
   const x1 = Math.min(lv.gw - 1, Math.ceil((cam.x + hw) / T) + 1);
@@ -1757,8 +1779,10 @@ function drawTiles() {
         a = Math.max(a, 0.22 * clamp(1 - d / 60, 0, 1));
       }
       if (a < 0.02) continue;
+      const n = tx * 7 + ty * 13, art = ART[`floor_${theme}_${[0, 1, 0, 1, 2][n % 5]}`];
       ctx.globalAlpha = Math.min(1, a);
-      ctx.drawImage(ts[(tx * 7 + ty * 13) % 3], tx * T, ty * T, T + 0.5, T + 0.5);
+      ctx.imageSmoothingEnabled = !!art;
+      ctx.drawImage(art || ts[n % 3], tx * T, ty * T, T + 0.5, T + 0.5);
     }
   }
   ctx.globalAlpha = 1;
@@ -1955,7 +1979,7 @@ function drawFaces() {
   const x1 = Math.min(lv.gw - 1, Math.ceil((cam.x + hw) / T) + 1);
   const y0 = Math.max(0, Math.floor((cam.y - hh) / T) - 1);
   const y1 = Math.min(lv.gh - 1, Math.ceil((cam.y + hh) / T) + 1);
-  const th = THEMES[themeOf()], full = lightMode || lv.cfg.safe;
+  const th = THEMES[themeOf()], strip = ART[`wall_${themeOf()}`], full = lightMode || lv.cfg.safe;
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -1973,7 +1997,9 @@ function drawFaces() {
         if (d === 0) { ax = bx = X + T; nx = -1; }
         else if (d === 2) { ay = by = Y + T; bx = X + T; nx = 0; ny = -1; }
         else if (d === 3) { bx = X + T; by = Y; nx = 0; ny = 1; }
-        drawFace(th, ax, ay, bx, by, nx, ny, Math.min(1, m * 0.85), tx * 31 + ty * 17 + d * 7);
+        const seed = tx * 31 + ty * 17 + d * 7;
+        if (strip) drawWallStrip(strip, ax, ay, bx, by, nx, ny, Math.min(1, m), seed);
+        else drawFace(th, ax, ay, bx, by, nx, ny, Math.min(1, m * 0.85), seed);
       }
     }
   }
@@ -1981,6 +2007,21 @@ function drawFaces() {
 }
 
 const hash01 = n => { const v = Math.sin(n * 127.1) * 43758.5453; return v - Math.floor(v); };
+
+// A band of wall art lying just inside the wall, along the edge from (ax,ay) to (bx,by).
+// The strip image is tall, with its corridor-facing side on the right.
+const WALL_TH = 10;
+function drawWallStrip(img, ax, ay, bx, by, nx, ny, a, seed) {
+  const ux = (bx - ax) / T, uy = (by - ay) / T;
+  const seg = Math.min(img.height, img.width * T / WALL_TH);
+  const sy = Math.floor(hash01(seed) * (img.height - seg));
+  ctx.save();
+  ctx.transform(-nx, -ny, ux, uy, ax + nx * WALL_TH, ay + ny * WALL_TH);
+  ctx.globalAlpha = a;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, 0, sy, img.width, seg, 0, 0, WALL_TH, T);
+  ctx.restore();
+}
 
 function drawFace(th, ax, ay, bx, by, nx, ny, a, seed) {
   // a point t of the way along the edge, pushed `off` pixels into the wall
@@ -2198,7 +2239,7 @@ function text(s, x, y, font, a, color = '255,255,255', align = 'center') {
   ctx.textAlign = align;
   ctx.textBaseline = 'middle';
   ctx.fillStyle = `rgba(${color},${a})`;
-  ctx.fillText(s, x, y);
+  ctx.fillText(s, x, y, align === 'center' ? W - 16 : undefined);
 }
 
 function wrap(s, maxW) {
@@ -2279,7 +2320,14 @@ function render() {
     ctx.fillRect(0, 0, W, H);
   }
 
+  // Menus and HUD go on a virtual screen (real size / UIS), then touch buttons at real size
+  const rw = W, rh = H, rmx = mouseX, rmy = mouseY;
+  W = rw / UIS; H = rh / UIS; mouseX = rmx / UIS; mouseY = rmy / UIS;
+  ctx.setTransform(DPR * UIS, 0, 0, DPR * UIS, 0, 0);
   drawUI();
+  W = rw; H = rh; mouseX = rmx; mouseY = rmy;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (touchMode) drawTouchUI();
 }
 
 // ============================================================================
@@ -2424,7 +2472,7 @@ function drawUI() {
 
     // preview of the chosen character
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(SPR.players[save.settings.character ? 1 : 0][Math.floor(time * 3) % 2], cx - 40, H * 0.36 + 7 * 36 - 6, 80, 80);
+    ctx.drawImage(SPR.players[save.settings.character ? 1 : 0][Math.floor(time * 3) % 2], cx + 180, H * 0.36 + 3 * 36, 80, 80);
 
     text('UP / DOWN to navigate  ·  LEFT / RIGHT to adjust  ·  ESC to return', cx, H - 54, `13px ${MONO}`, 0.45);
     drawToast();
@@ -2523,14 +2571,15 @@ function drawUI() {
 
   // The wizard's cave shows your experience instead of pebbles
   if (lv && lv.wizard) {
-    text(spaced(`EXPERIENCE  ${save.xp}`), W - 22, 26, `12px ${MONO}`, 0.8, '242,201,76', 'right');
+    text(spaced(`EXPERIENCE  ${save.xp}`), W - 22, W < 700 ? 48 : 26, `12px ${MONO}`, 0.8, '242,201,76', 'right');
   }
 
   // Pebbles HUD Counter
   if (lv && !lv.wizard) {
+    const py = W < 700 ? 37 : 15;
     ctx.imageSmoothingEnabled = false;
-    for (let k = 0; k < lv.pebbles; k++) ctx.drawImage(SPR.pebble[0], W - 35 - k * 14, 15, 22, 22);
-    text('PEBBLES', W - 32 - lv.pebbles * 14, 26, `10px ${MONO}`, 0.35, '255,255,255', 'right');
+    for (let k = 0; k < lv.pebbles; k++) ctx.drawImage(SPR.pebble[0], W - 35 - k * 14, py, 22, 22);
+    text('PEBBLES', W - 32 - lv.pebbles * 14, py + 11, `10px ${MONO}`, 0.35, '255,255,255', 'right');
   }
 
   // Level intro banner
@@ -2552,7 +2601,7 @@ function drawUI() {
 
   // Exit compass hint
   if (exitHintT > 0 && lv && state === 'play') {
-    const sx = W / 2 + (lv.exit.x - cam.x) * ZOOM, sy = H / 2 + (lv.exit.y - cam.y) * ZOOM;
+    const sx = W / 2 + (lv.exit.x - cam.x) * ZOOM / UIS, sy = H / 2 + (lv.exit.y - cam.y) * ZOOM / UIS;
     const m = 26;
     if (sx < m || sx > W - m || sy < m || sy > H - m) {
       const dx = sx - W / 2, dy = sy - H / 2;
@@ -3121,7 +3170,7 @@ function shoot(wx, wy) {
 // ============================================================================
 // 15. INPUT HANDLING
 // ============================================================================
-window.addEventListener('keydown', e => {
+function onKey(e) {
   initAudio();
 
   // Dev Console Toggle
@@ -3281,7 +3330,15 @@ window.addEventListener('keydown', e => {
   else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyZ') whisper();
   else if (e.code === 'KeyX') sneakToggle = !sneakToggle;
   else if (e.code === 'KeyR') startLevel(false);
-});
+}
+window.addEventListener('keydown', onKey);
+
+// A touch button acts like one quick key press
+function pressKey(code) {
+  onKey({ code, key: '', repeat: false, preventDefault() {} });
+  keys[code] = false;
+  tapUntil[code] = 0;
+}
 
 window.addEventListener('keyup', e => {
   keys[e.code] = false;
@@ -3350,45 +3407,159 @@ function adjustSetting(idx, dir) {
   persist();
 }
 
-cv.addEventListener('mousedown', e => {
-  initAudio();
-  mouseX = e.clientX;
-  mouseY = e.clientY;
+const onItemIcons = (x, y) => y / UIS > H / UIS - 66 && x / UIS < 22 + save.upgrades.length * 48;
 
-  // Title screen mouse click selection
+// A click or a tap at screen position (x, y)
+function pointerDown(x, y, button = 0) {
+  initAudio();
+  mouseX = x;
+  mouseY = y;
+  const uy = y / UIS, uH = H / UIS;
+
+  // Title screen: pick a menu line
   if (state === 'title') {
-    const clickedIdx = Math.floor((e.clientY - H * 0.48 + 14) / 28);
-    if (clickedIdx >= 0 && clickedIdx < 8) {
-      menuSelection = clickedIdx;
-      triggerTitleMenu(clickedIdx);
+    const k = Math.floor((uy - uH * 0.48 + 14) / 28);
+    if (k >= 0 && k < 8) {
+      menuSelection = k;
+      triggerTitleMenu(k);
     }
     return;
   }
 
-  // Level select mouse click
+  // Level select: pick a level
   if (state === 'level_select') {
-    const clickedIdx = Math.floor((e.clientY - H * 0.32 + 15) / 30);
-    if (clickedIdx >= 0 && clickedIdx < LEVELS.length) {
-      menuSelection = clickedIdx;
-      if (menuSelection < save.depth) {
+    const k = Math.floor((uy - uH * 0.32 + 15) / 30);
+    if (k >= 0 && k < LEVELS.length) {
+      menuSelection = k;
+      if (k < save.depth) {
         mode = 'story';
-        levelIdx = menuSelection;
+        levelIdx = k;
         startLevel(true);
       }
     }
     return;
   }
 
-  if (state !== 'play' || e.button !== 0 || consoleOpen) return;
+  if (state !== 'play' || button !== 0 || consoleOpen) return;
+  if (onItemIcons(x, y)) return; // item icons show their tooltip instead of throwing
 
   if (hasGun) {
     mouseHeld = true;
     return;
   }
 
-  // Throw pebble toward cursor in world coords
-  throwPebble((e.clientX - W / 2) / ZOOM + cam.x, (e.clientY - H / 2) / ZOOM + cam.y);
-});
+  // Throw a pebble toward that spot in the world
+  throwPebble((x - W / 2) / ZOOM + cam.x, (y - H / 2) / ZOOM + cam.y);
+}
+
+cv.addEventListener('mousedown', e => pointerDown(e.clientX, e.clientY, e.button));
+
+// ---- Touch
+const TOUCH_MENUS = {
+  title: [['▲', 'ArrowUp'], ['▼', 'ArrowDown'], ['OK', 'Enter']],
+  level_select: [['▲', 'ArrowUp'], ['▼', 'ArrowDown'], ['OK', 'Enter'], ['BACK', 'Escape']],
+  journal: [['◀', 'ArrowLeft'], ['▶', 'ArrowRight'], ['BACK', 'Escape']],
+  achievements: [['BACK', 'Escape']],
+  credits: [['BACK', 'Escape']],
+  settings: [['▲', 'ArrowUp'], ['▼', 'ArrowDown'], ['◀', 'ArrowLeft'], ['▶', 'ArrowRight'], ['BACK', 'Escape']],
+  ending: [['OK', 'Enter']],
+  pause: [['RESUME', 'Escape'], ['RESTART', 'KeyR'], ['JOURNAL', 'KeyJ'], ['QUIT', 'KeyQ']]
+};
+
+// The buttons for the current screen, in real screen pixels. Round ones have r, bars have w and h.
+function touchButtons() {
+  if (state === 'play') {
+    const r = clamp(Math.min(W, H) * 0.085, 30, 44);
+    return [
+      { label: 'CLAP', code: 'Space', x: W - r * 1.6, y: H - r * 1.7, r: r * 1.15 },
+      { label: 'WHISPER', code: 'KeyZ', x: W - r * 4.1, y: H - r * 1.3, r: r * 0.9 },
+      { label: 'SNEAK', code: 'KeyX', x: W - r * 1.4, y: H - r * 4.2, r: r * 0.9, on: sneakToggle },
+      { label: 'II', code: 'Escape', x: W - 28, y: 84, r: 18 }
+    ];
+  }
+  const list = TOUCH_MENUS[state];
+  if (!list) return [];
+  const bw = Math.min(110, (W - 16) / list.length - 8), total = list.length * (bw + 8) - 8;
+  return list.map(([label, code], k) => ({ label, code, x: (W - total) / 2 + k * (bw + 8) + bw / 2, y: H - 34, w: bw, h: 46 }));
+}
+
+const hitButton = (b, x, y) => b.r ? Math.hypot(x - b.x, y - b.y) < b.r * 1.2 : Math.abs(x - b.x) < b.w / 2 + 4 && Math.abs(y - b.y) < b.h / 2 + 6;
+
+cv.addEventListener('touchstart', e => {
+  e.preventDefault();
+  touchMode = true;
+  initAudio();
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    const b = touchButtons().find(b => hitButton(b, x, y));
+    if (b) { pressKey(b.code); continue; }
+    if (state === 'play' && joy.id === null && x < W * 0.45 && y > H * 0.3 && !onItemIcons(x, y)) {
+      joy.id = t.identifier; joy.ox = x; joy.oy = y; joy.x = joy.y = 0;
+      continue;
+    }
+    pointerDown(x, y);
+  }
+}, { passive: false });
+
+cv.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== joy.id) continue;
+    const dx = (t.clientX - joy.ox) / JOY_R, dy = (t.clientY - joy.oy) / JOY_R, l = Math.max(1, Math.hypot(dx, dy));
+    joy.x = dx / l;
+    joy.y = dy / l;
+  }
+}, { passive: false });
+
+function touchEnd(e) {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joy.id) { joy.id = null; joy.x = joy.y = 0; }
+  }
+  mouseHeld = false;
+}
+cv.addEventListener('touchend', touchEnd);
+cv.addEventListener('touchcancel', touchEnd);
+
+function drawTouchUI() {
+  const bs = touchButtons();
+  ctx.globalAlpha = 1;
+  if (state !== 'play' && bs.length) {
+    ctx.fillStyle = 'rgba(0,0,0,0.88)';
+    ctx.fillRect(0, H - 66, W, 66);
+  }
+  for (const b of bs) {
+    ctx.fillStyle = b.on ? 'rgba(60,110,150,0.6)' : 'rgba(20,28,40,0.5)';
+    ctx.strokeStyle = 'rgba(200,225,255,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if (b.r) ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    else ctx.rect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h);
+    ctx.fill();
+    ctx.stroke();
+    // the clap button fills back up while the clap recharges
+    if (b.code === 'Space' && clapCd > 0) {
+      ctx.strokeStyle = 'rgba(255,235,160,0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r - 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - clapCd / 2.2));
+      ctx.stroke();
+    }
+    text(b.label, b.x, b.y, `${b.r && b.r < 30 ? 10 : 12}px ${MONO}`, 0.9);
+  }
+  if (state === 'play') {
+    // thumb-stick: shown where the thumb went down, or as a faint hint
+    const on = joy.id !== null, jx = on ? joy.ox : W * 0.17, jy = on ? joy.oy : H - 110;
+    ctx.strokeStyle = `rgba(200,225,255,${on ? 0.5 : 0.18})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(jx, jy, JOY_R, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = `rgba(200,225,255,${on ? 0.45 : 0.12})`;
+    ctx.beginPath();
+    ctx.arc(jx + joy.x * JOY_R, jy + joy.y * JOY_R, 18, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
 
 cv.addEventListener('mousemove', e => {
   mouseX = e.clientX;
