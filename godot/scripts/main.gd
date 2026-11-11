@@ -23,10 +23,28 @@ var endless_round := 1
 var cur_seed := 0
 var wizard_stop := 0   # 0 = not at the wizard, 1 or 2 = which visit
 var menu_sel := 0
+var shop_tab := 0      # wizard shop: 0 = Shop, 1 = Sell
+var shop_sel := 0      # which item is picked on the Sell tab
+var shop_buy_sel := 0  # which item is picked on the Shop tab
+var shop_msg := ""
+
+# items bought from the wizard
+var equipped := ""                  # the item in the player's hand ("" = none)
+var arrow_kind := "arrow"           # which arrow the bow shoots: "arrow" or "poison"
+var face := Vector2.RIGHT           # the way the player last moved
+var mists: Array = []               # sleep powder clouds: { pos, t }
+var arrows_fly: Array = []          # arrows in the air: { pts, at, kind }
+var arrows_stuck: Array = []        # missed arrows waiting to be picked up: { pos, ang, kind }
+var machine = null                  # a placed clapping machine: { pos, state, t, claps }
+var gun_reload := 0.0
+var torch_cell := -1
+var torch_field = null
 var time := 0.0
 
 var save := {
-	"depth": 1, "completed": false, "notes": [], "best": {}, "endlessBest": 0, "xp": 0, "atWizard": 0,
+	"depth": 1, "completed": false, "notes": [], "best": {}, "endlessBest": 0, "xp": 0, "atWizard": 0, "crystals": 0,
+	"inv": { "legs": 0, "tentacles": 0, "antennas": 0, "hands": 0 },
+	"items": { "powder": 0, "bow": 0, "arrow": 0, "quiver": 0, "poison": 0, "torch": 0, "torch_charge": 0.0, "machine": 0, "gun": 0, "bullet": 0 },
 	"achievements": [], "upgrades": [],
 	"stats": { "deaths": 0, "steps": 0, "claps": 0, "whispers": 0, "pebbles": 0, "chimes": 0, "sleepersAwakened": 0, "secrets": 0, "timePlayed": 0.0 },
 	"settings": { "masterVol": 0.8, "sfxVol": 0.9, "ambVol": 0.75, "screenShake": true, "character": 0 },
@@ -47,8 +65,7 @@ var note_taken := false
 var pebbles := 0
 var chime = null                    # { pos, ringing, cooldown }
 var door = null                     # { tile, pos, open }
-var secret = null                   # { tile, pos, broken, seen }
-var upgrade_item = null             # { pos, id, taken }
+var drops: Array = []               # things creatures dropped: { pos, id }
 var wizard_pos = null
 
 var player := Vector2.ZERO
@@ -148,7 +165,10 @@ func _ready() -> void:
 
 func _load_textures() -> void:
 	for n in ["player0", "player1", "listener", "drifter", "sleeper0", "sleeper1", "sleeper2", "mimic", "wizard",
-			"exit", "note", "pebble", "chime", "door", "crack", "phosphor", "soles", "crystal", "satchel"]:
+			"exit", "note", "pebble", "chime", "door", "phosphor", "soles", "crystal", "satchel", "bluecrystal",
+			"drop_legs", "drop_tentacles", "drop_antennas", "drop_hands", "icon_legs", "icon_tentacles", "icon_antennas", "icon_hands",
+			"icon_powder", "icon_bow", "icon_arrow", "icon_quiver", "icon_poison", "icon_torch", "icon_machine", "icon_gun", "icon_bullet",
+			"held_powder", "held_bow", "held_torch", "held_machine", "held_gun", "arrow", "arrow_poison", "machine_placed"]:
 		tex["spr_" + n] = load("res://art/spr_%s.png" % n)
 	for th in D.THEMES.keys():
 		tex["tile_" + th] = load("res://art/tile_%s.png" % th)
@@ -257,6 +277,9 @@ func load_save() -> void:
 	save.xp = int(save.xp)
 	save.atWizard = int(save.atWizard)
 	save.endlessBest = int(save.endlessBest)
+	save.crystals = int(save.crystals)
+	for k in save.inv.keys():
+		save.inv[k] = int(save.inv[k])
 	save.notes = save.notes.map(func(v): return int(v))
 
 
@@ -279,20 +302,6 @@ func unlock_achievement(id: String) -> void:
 		if a.id == id:
 			toast_queue.append(a)
 			sfx.play("achievement")
-
-
-func unlock_upgrade(id: String) -> void:
-	if has_upgrade(id):
-		return
-	save.upgrades.append(id)
-	persist()
-	for u in D.UPGRADES:
-		if u.id == id:
-			kill_text = "Artifact Discovered: %s" % u.name
-			kill_t = 4.0
-			sfx.play("secret")
-	if save.upgrades.size() >= D.UPGRADES.size():
-		unlock_achievement("upgraded")
 
 
 # ================================================================ maze helpers
@@ -361,8 +370,6 @@ func is_wall_t(tx: int, ty: int) -> bool:
 		return true
 	if door != null and not door.open and door.tile == Vector2i(tx, ty):
 		return true
-	if secret != null and not secret.broken and secret.tile == Vector2i(tx, ty):
-		return true
 	return g[ty * gw + tx] == 1
 
 
@@ -427,7 +434,7 @@ func endless_cfg(r: int) -> Dictionary:
 		"cells": [mini(24, 9 + r), mini(20, 7 + r)], "surf": surfs[(r - 1) % surfs.size()],
 		"listeners": mini(4, 1 + r / 2), "drifters": mini(4, r / 2) if r >= 2 else 0,
 		"sleepers": mini(3, (r - 1) / 3) if r >= 3 else 0, "mimics": (1 if r % 2 == 0 else 0) if r >= 4 else 0,
-		"hasChime": r >= 2 and randf() < 0.6, "hasDoor": r >= 3 and randf() < 0.4, "hasSecret": randf() < 0.35,
+		"hasChime": r >= 2 and randf() < 0.6, "hasDoor": r >= 3 and randf() < 0.4,
 		"pebbles": 3, "lSpeed": minf(1.45, 1.0 + r * 0.04),
 		"hint": "Endless descent. How deep into the silence can you survive?" if r == 1 else "",
 	}
@@ -438,9 +445,7 @@ func build_level(c: Dictionary, seed_value: int) -> void:
 	cfg = c
 	has_level = false
 	door = null
-	secret = null
 	chime = null
-	upgrade_item = null
 	note_pos = null
 	wizard_pos = null
 	gen_maze(c.cells[0], c.cells[1], rng)
@@ -480,25 +485,6 @@ func build_level(c: Dictionary, seed_value: int) -> void:
 			note_pos = center_of(pool[int(rng.next() * pool.size())])
 			note_idx = level_idx
 
-	# cracked secret wall, with the level's upgrade behind it
-	if c.get("hasSecret", false) or c.has("upgrade"):
-		var cand = []
-		for ty in range(1, gh - 1):
-			for tx in range(1, gw - 1):
-				var idx = ty * gw + tx
-				if g[idx] == 1:
-					var adj = []
-					for o in [idx - 1, idx + 1, idx - gw, idx + gw]:
-						if g[o] == 0:
-							adj.append(o)
-					if adj.size() >= 2:
-						cand.append({ "tile": Vector2i(tx, ty), "adj": adj })
-		if not cand.is_empty():
-			var ch = cand[int(rng.next() * cand.size())]
-			secret = { "tile": ch.tile, "pos": (Vector2(ch.tile) + Vector2(0.5, 0.5)) * T, "broken": false, "seen": 0.0 }
-			if c.has("upgrade") and not has_upgrade(c.upgrade):
-				upgrade_item = { "pos": center_of(ch.adj[0]), "id": c.upgrade, "taken": false }
-
 	# resonance chime
 	if c.get("hasChime", false):
 		var pool2 = cells.filter(func(i): return i != fi and i != start_i and d[i] > 3 and d[i] < far * 0.7)
@@ -516,6 +502,26 @@ func build_level(c: Dictionary, seed_value: int) -> void:
 		if not pool3.is_empty():
 			var di: int = pool3[int(rng.next() * pool3.size())]
 			door = { "tile": Vector2i(di % gw, di / gw), "pos": center_of(di), "open": false }
+
+	# On this level the chime sits in a far right-hand corner (the one further from the way
+	# down), so it is not rung by accident and has to be found on purpose.
+	if c.get("chimeCorner", false) and chime != null:
+		var reach = bfs(start_i)   # only places that can be reached while the door is shut
+		var corner = Vector2((gw - 1.5) * T, 1.5 * T)
+		var low_corner = Vector2((gw - 1.5) * T, (gh - 1.5) * T)
+		if low_corner.distance_to(exit_pos) > corner.distance_to(exit_pos):
+			corner = low_corner
+		var best_i = -1
+		var best_d = INF
+		for i in cells:
+			if i == fi or i == start_i or reach[i] < 0:
+				continue
+			var dd = center_of(i).distance_to(corner)
+			if dd < best_d:
+				best_d = dd
+				best_i = i
+		if best_i >= 0:
+			chime.pos = center_of(best_i)
 
 	# monsters
 	enemies = []
@@ -563,6 +569,7 @@ func _init_enemy(e: Dictionary) -> void:
 	e["slow_t"] = 0.0
 	e["bar_t"] = 0.0
 	e["reveal"] = 0.0   # glows for a moment when a sound wave reaches it
+	e["noregen_t"] = 0.0   # poisoned: cannot heal while this is above zero
 
 
 ## The grid sound travels over: 4 x 4 cells per maze tile, each marked wall or open.
@@ -618,6 +625,12 @@ func _clear_effects() -> void:
 		waves[i] = null
 	flying = []
 	water_ripples = []
+	drops = []
+	mists = []
+	arrows_fly = []
+	arrows_stuck = []
+	machine = null
+	torch_cell = -1
 
 
 func next_level() -> void:
@@ -813,18 +826,6 @@ func update_ripples(dt: float) -> void:
 			exit_seen = 1.0
 			exit_floor = 0.35
 
-		# a strong clap cracks open a secret wall
-		if secret != null and not secret.broken:
-			var best = FAR
-			for d in DIRS:
-				best = minf(best, wave_dist(w, secret.pos + Vector2(d) * T * 0.75))
-			if best <= front:
-				var inten = w.strength * (1.0 - 0.6 * best / w.max_r)
-				secret.seen = maxf(secret.seen, inten)
-				if w.hurts and inten > 0.6 and not w.secret_done:
-					w.secret_done = true
-					_break_secret()
-
 		# the wave reaches a creature
 		for e in enemies.duplicate():
 			if is_same(e, w.src) or w.hit.has(e):
@@ -845,22 +846,6 @@ func update_ripples(dt: float) -> void:
 		wr.alpha -= dt * 0.7
 		if wr.alpha <= 0.0 or wr.r >= wr.max_r:
 			water_ripples.remove_at(k)
-
-
-func _break_secret() -> void:
-	secret.broken = true
-	g[secret.tile.y * gw + secret.tile.x] = 0
-	shake = maxf(shake, 6.0)
-	sfx.play("kill", secret.pos)
-	kill_text = "A secret passage cracked open!"
-	kill_t = 3.5
-	unlock_achievement("secret_finder")
-	save.stats.secrets += 1
-	persist()
-	_rebuild_blocked()
-	floor_view.queue_redraw()
-	wall_view.queue_redraw()
-	spawn_ripple(secret.pos, { "max_r": 180.0, "speed": 200.0, "alpha": 0.8, "light": 0.6 })
 
 
 const WAVE_COL := { "normal": Color(0.92, 0.96, 1.0), "red": Color(1.0, 0.3, 0.3), "gold": Color(1.0, 0.84, 0.4) }
@@ -897,8 +882,12 @@ func update_overlay(dt: float) -> void:
 			glow.append(Vector4(chime.pos.x, chime.pos.y, 90.0 if chime.ringing > 0.0 else 40.0, (0.8 + 0.2 * sin(time * 15.0)) if chime.ringing > 0.0 else 0.14))
 		if wizard_pos != null:
 			glow.append(Vector4(wizard_pos.x, wizard_pos.y, 300.0, 0.95 + 0.05 * sin(time * 2.0)))
-		if upgrade_item != null and not upgrade_item.taken:
-			glow.append(Vector4(upgrade_item.pos.x, upgrade_item.pos.y, 34.0, 0.25))
+		for it in mists + arrows_stuck + ([machine] if machine != null else []):
+			if glow.size() < 8:
+				glow.append(Vector4(it.pos.x, it.pos.y, 44.0 if it.has("t") and not it.has("state") else 26.0, 0.28))
+		for dr in drops:
+			if glow.size() < 12:
+				glow.append(Vector4(dr.pos.x, dr.pos.y, 30.0, 0.3 + 0.08 * sin(time * 4.0)))
 		for e in enemies:
 			e.reveal = maxf(0.0, e.reveal - dt / 1.2)
 			var own = 0.0
@@ -909,6 +898,18 @@ func update_overlay(dt: float) -> void:
 			var strength = maxf(own, e.reveal * 0.8)
 			if strength > 0.01 and glow.size() < 16:
 				glow.append(Vector4(e.pos.x, e.pos.y, e.r * 4.0, strength))
+	# the torch beam
+	var torch_on = playing and state != "dead" and equipped == "torch" and save.items.torch_charge > 0.0
+	overlay_mat.set_shader_parameter("torch", Vector4(player.x, player.y, D.TORCH_RANGE, 0.95 if torch_on else 0.0))
+	if torch_on:
+		var cell = tile_idx(player) * 64 + (floori(player.x / CELL) % 4) + (floori(player.y / CELL) % 4) * 4
+		if cell != torch_cell or torch_field == null:
+			torch_cell = cell
+			torch_field = { "origin": player, "max_r": D.TORCH_RANGE * 1.4 }
+			_compute_field(torch_field)
+			overlay_mat.set_shader_parameter("ft", torch_field.tex)
+		overlay_mat.set_shader_parameter("torch_dir", aim_dir())
+
 	var n = glow.size()
 	glow.resize(16)
 	overlay_mat.set_shader_parameter("glow", glow)
@@ -948,6 +949,8 @@ func damage(e: Dictionary, amount: float) -> void:
 		enemies.erase(e)
 		save.xp += D.XP_REWARD.get(e.type, 0)
 		persist()
+		if D.DROPS.has(e.type):
+			drops.append({ "pos": e.pos, "id": D.DROPS[e.type].id, "name": D.DROPS[e.type].name })
 		kill_text = "%s is destroyed." % D.NAMES[e.type]
 		kill_t = 3.5
 		sfx.play("kill", e.pos)
@@ -1069,7 +1072,9 @@ func choose_next(e: Dictionary) -> void:
 
 func update_enemies(dt: float) -> void:
 	for e in enemies.duplicate():
-		e.hp = minf(e.max_hp, e.hp + 4.0 * dt)
+		e.noregen_t -= dt
+		if e.noregen_t <= 0.0:
+			e.hp = minf(e.max_hp, e.hp + 4.0 * dt)
 		e.slow_t -= dt
 		e.bar_t -= dt
 
@@ -1308,13 +1313,11 @@ func update_game(dt: float) -> void:
 			spawn_ripple(Vector2(randf_range(-W / 3, W / 3), randf_range(-H / 5, H / 5)) / ZOOM, { "max_r": 360.0, "speed": 130.0, "alpha": 0.45, "tail": 0.25 })
 		update_ripples(dt)
 		return
-	if state in ["pause", "journal", "achievements", "settings", "level_select", "credits"] or console_open or not has_level:
+	if state in ["pause", "shop", "journal", "achievements", "settings", "level_select", "credits"] or console_open or not has_level:
 		return
 
 	update_ripples(dt)
 	exit_seen = maxf(exit_floor, exit_seen - dt / 3.0)
-	if secret != null:
-		secret.seen = maxf(0.0, secret.seen - dt / 5.0)
 
 	if state == "dead":
 		dead_t -= dt
@@ -1353,6 +1356,7 @@ func update_game(dt: float) -> void:
 	if moving:
 		var sp = (68.0 if has_upgrade("soles") else 55.0) if sneaking else 118.0
 		var step = m.normalized() * sp * dt
+		face = m.normalized()
 		if not collides(player + Vector2(step.x, 0)): player.x += step.x
 		if not collides(player + Vector2(0, step.y)): player.y += step.y
 		save.stats.steps += 1
@@ -1376,6 +1380,7 @@ func update_game(dt: float) -> void:
 		shoot(screen_to_world(mouse_pos))
 
 	update_pebbles(dt)
+	update_items(dt)
 	update_enemies(dt)
 	if state != "play":
 		return
@@ -1415,9 +1420,18 @@ func update_game(dt: float) -> void:
 			persist()
 		sfx.play("note")
 
-	if upgrade_item != null and not upgrade_item.taken and player.distance_to(upgrade_item.pos) < 16.0:
-		upgrade_item.taken = true
-		unlock_upgrade(upgrade_item.id)
+	# pick up what creatures dropped
+	for k in range(drops.size() - 1, -1, -1):
+		if player.distance_to(drops[k].pos) < 16.0:
+			save.inv[drops[k].id] = int(save.inv.get(drops[k].id, 0)) + 1
+			persist()
+			kill_text = "Picked up: %s" % drops[k].name
+			if drops[k].id == "tentacles" and equipped == "torch":
+				save.items.torch_charge = minf(D.TORCH_TIME, save.items.torch_charge + 2.0)
+				kill_text = "The tentacle feeds the torch (+2s)"
+			kill_t = 2.5
+			sfx.play("note")
+			drops.remove_at(k)
 
 	danger = 0.0
 	for e in enemies:
@@ -1544,10 +1558,15 @@ func draw_entities(c: CanvasItem) -> void:
 		_sprite(c, "note", note_pos, 20)
 	if chime != null:
 		_sprite(c, "chime", chime.pos, 26, 12.0 if chime.ringing > 0.0 else 0.0)
-	if secret != null and not secret.broken:
-		_sprite(c, "crack", secret.pos, T, 0)
-	if upgrade_item != null and not upgrade_item.taken:
-		_sprite(c, upgrade_item.id, upgrade_item.pos, 22, 3)
+	for dr in drops:
+		_sprite(c, "drop_" + dr.id, dr.pos, 22, 3)
+	if machine != null:
+		_sprite(c, "machine_placed", machine.pos, 26, 8.0 if machine.state == "clapping" else 0.0)
+	for a in arrows_stuck:
+		_rotated(c, "arrow_poison" if a.kind == "poison" else "arrow", a.pos, a.ang, 16)
+	for a in arrows_fly:
+		var i = mini(int(a.at), a.pts.size() - 2)
+		_rotated(c, "arrow_poison" if a.kind == "poison" else "arrow", a.pts[i].lerp(a.pts[i + 1], a.at - i), (a.pts[i + 1] - a.pts[i]).angle(), 16)
 	if wizard_pos != null:
 		_sprite(c, "wizard", wizard_pos, 40, 2)
 	for e in enemies:
@@ -1562,11 +1581,31 @@ func draw_entities(c: CanvasItem) -> void:
 		_sprite(c, "pebble", p.pos, 14)
 	if state != "dead":
 		_sprite(c, "player%d" % (1 if save.settings.character else 0), player, 21.0 if is_sneaking() else 25.0, 8.0 if player_loud else 0.0)
+		if equipped != "":
+			var dir = aim_dir()
+			_rotated(c, "held_" + equipped, player + dir * 11.0, dir.angle(), 16)
 
 
 ## Things drawn on top of the darkness: water rings, gun tracers, creature health bars.
 ## (The sound waves themselves are drawn by the light shader.)
 func draw_echo(c: CanvasItem) -> void:
+	# sleep powder: slow drifting puffs
+	for m in mists:
+		var a = clampf(m.t / 1.0, 0.0, 1.0) * 0.16
+		for k in 7:
+			var ang = k * 0.9 + time * (0.3 + 0.07 * k)
+			c.draw_circle(m.pos + Vector2(cos(ang), sin(ang * 1.3)) * (12.0 + 5.0 * sin(time + k)), 13.0 + 3.0 * sin(time * 1.7 + k), Color(0.75, 0.6, 1.0, a))
+	# aiming: dots along the path the shot will take, and a ring where it lands
+	if state == "play" and (equipped == "bow" or equipped == "gun") and not touch_mode:
+		var pts = arrow_path(aim_dir()) if equipped == "bow" else PackedVector2Array([player, _gun_end(aim_dir())])
+		if equipped == "gun":
+			var far_pt = pts[1]
+			pts = PackedVector2Array()
+			for k in 17:
+				pts.append(player.lerp(far_pt, k / 16.0))
+		for k in range(1, pts.size(), 1 if equipped == "bow" else 2):
+			c.draw_rect(Rect2(pts[k] - Vector2(1, 1), Vector2(2, 2)), Color(1, 0.95, 0.7, 0.75 * (1.0 - 0.5 * k / pts.size())))
+		c.draw_arc(pts[pts.size() - 1], 4.0, 0, TAU, 16, Color(1, 0.95, 0.7, 0.8), 1.0, true)
 	for wr in water_ripples:
 		c.draw_arc(wr.pos, wr.r, 0, TAU, 24, Color(0.6, 0.9, 1.0, wr.alpha), 1.0, true)
 	for s in shots:
@@ -1587,6 +1626,7 @@ const KEY_NAMES := {
 	KEY_UP: "ArrowUp", KEY_DOWN: "ArrowDown", KEY_LEFT: "ArrowLeft", KEY_RIGHT: "ArrowRight",
 	KEY_SPACE: "Space", KEY_ENTER: "Enter", KEY_KP_ENTER: "Enter", KEY_ESCAPE: "Escape", KEY_SHIFT: "ShiftLeft",
 	KEY_BACKSPACE: "Backspace", KEY_QUOTELEFT: "Backquote",
+	KEY_1: "Digit1", KEY_2: "Digit2", KEY_3: "Digit3", KEY_4: "Digit4", KEY_5: "Digit5",
 }
 
 
@@ -1641,7 +1681,7 @@ func press_key(code: String) -> void:
 
 
 func on_item_icons(p: Vector2) -> bool:
-	return p.y / UIS > H / UIS - 66.0 and p.x / UIS < 22.0 + save.upgrades.size() * 48.0
+	return p.y / UIS > H / UIS - 66.0 and p.x / UIS < 22.0 + owned_items().size() * 48.0
 
 
 func pointer_down(p: Vector2) -> void:
@@ -1664,12 +1704,26 @@ func pointer_down(p: Vector2) -> void:
 				level_idx = k2
 				start_level(true)
 		return
-	if state != "play" or console_open or on_item_icons(p):
+	if state == "shop":
+		var act = hud.shop_action_at(p / UIS)
+		if act != "":
+			shop_action(act)
+		return
+	if state != "play" or console_open:
+		return
+	if on_item_icons(p):
+		equip(owned_items()[clampi(floori((p.x / UIS - 22.0) / 48.0), 0, owned_items().size() - 1)])
+		return
+	if near_wizard() and screen_to_world(p).distance_to(wizard_pos) < 34.0:
+		open_shop()
 		return
 	if has_gun:
 		mouse_held = true
 		return
-	throw_pebble(screen_to_world(p))
+	if equipped != "":
+		use_item(screen_to_world(p))
+	else:
+		throw_pebble(screen_to_world(p))
 
 
 func on_key(code: String) -> void:
@@ -1736,6 +1790,17 @@ func on_key(code: String) -> void:
 		"ending":
 			if ok or code == "Escape":
 				to_title()
+		"shop":
+			if code == "Escape" or code == "KeyE": state = "play"
+			elif up or down: shop_action("tab%d" % (1 - shop_tab))
+			elif shop_tab == 0:
+				if left: shop_buy_sel = (shop_buy_sel + 8) % 9
+				elif right: shop_buy_sel = (shop_buy_sel + 1) % 9
+				elif ok: shop_action("buy")
+			elif left: shop_sel = (shop_sel + 3) % 4
+			elif right: shop_sel = (shop_sel + 1) % 4
+			elif code == "Enter": shop_action("sell1")
+			elif code == "Space": shop_action("sellall")
 		"pause":
 			if code == "Escape" or code == "KeyP": state = "play"
 			elif code == "KeyR": start_level(false)
@@ -1744,10 +1809,334 @@ func on_key(code: String) -> void:
 			elif code == "KeyQ": to_title()
 		"play":
 			if code == "Escape" or code == "KeyP": state = "pause"
+			elif code == "KeyE" and near_wizard(): open_shop()
+			elif code.begins_with("Digit"):
+				var slot = code.right(1).to_int() - 1
+				if slot < owned_items().size(): equip(owned_items()[slot])
+			elif code == "KeyQ" and equipped == "bow":
+				arrow_kind = "poison" if (arrow_kind == "arrow" and item_count("poison") > 0) else "arrow"
 			elif code == "Space": clap()
 			elif code == "ShiftLeft" or code == "KeyZ": whisper()
 			elif code == "KeyX": sneak_toggle = not sneak_toggle
 			elif code == "KeyR": start_level(false)
+
+
+# ---------------------------------------------------------------- the wizard's shop
+func near_wizard() -> bool:
+	return has_level and wizard_pos != null and player.distance_to(wizard_pos) < 64.0
+
+
+func open_shop() -> void:
+	state = "shop"
+	shop_tab = 1 if _inv_total() > 0 else 0
+	shop_sel = 0
+	keys.clear()
+	joy_id = -1
+	joy = Vector2.ZERO
+
+
+func _inv_total() -> int:
+	var n = 0
+	for v in save.inv.values():
+		n += int(v)
+	return n
+
+
+## Sell creature drops to the wizard for blue crystals
+func sell(creature: String, all: bool) -> void:
+	var drop: Dictionary = D.DROPS[creature]
+	var have = int(save.inv.get(drop.id, 0))
+	if have <= 0:
+		return
+	var count = have if all else 1
+	save.inv[drop.id] = have - count
+	save.crystals += drop.price * count
+	persist()
+	sfx.play("achievement")
+
+
+## Something was chosen in the shop (by key, click or tap)
+func shop_action(act: String) -> void:
+	shop_msg = ""
+	if act == "close":
+		state = "play"
+	elif act == "buy":
+		if shop_tab == 0:
+			buy(D.ITEM_ORDER[shop_buy_sel])
+	elif act.begins_with("pick"):
+		shop_tab = 0
+		shop_buy_sel = act.right(1).to_int()
+	elif act.begins_with("tab"):
+		shop_tab = act.right(1).to_int()
+	elif act == "sell1":
+		if shop_tab == 1:
+			sell(D.DROP_ORDER[shop_sel], false)
+	elif act == "sellall":
+		if shop_tab == 1:
+			sell(D.DROP_ORDER[shop_sel], true)
+	elif act.begins_with("sel"):
+		shop_tab = 1
+		shop_sel = act.right(1).to_int()
+
+
+# ---------------------------------------------------------------- items from the wizard
+func item_count(id: String) -> int:
+	return int(save.items.get(id, 0))
+
+
+func arrow_cap(kind: String) -> int:
+	var has_satchel = item_count("quiver") > 0
+	if kind == "poison":
+		return 2 if has_satchel else 0
+	return 5 if has_satchel else 3
+
+
+## Why `id` cannot be bought right now ("" if it can)
+func cannot_buy(id: String) -> String:
+	var it: Dictionary = D.ITEMS[id]
+	if save.xp < D.SHOP_TIERS[it.tier].xp:
+		return "Locked: needs %d experience" % D.SHOP_TIERS[it.tier].xp
+	if save.crystals < it.price:
+		return "Not enough blue crystals"
+	var n = item_count(id)
+	match id:
+		"bow", "gun":
+			if n >= 5: return "You already have a new one"
+		"arrow":
+			if n >= arrow_cap("arrow"): return "You cannot carry more arrows"
+		"poison":
+			if arrow_cap("poison") == 0: return "Needs the Arrow Satchel"
+			if n >= 2: return "You cannot carry more special arrows"
+		"quiver":
+			if n > 0: return "You already own it"
+		"torch":
+			if n > 0 and save.items.torch_charge >= D.TORCH_TIME: return "Your torch is fully charged"
+		"powder":
+			if n >= 9: return "You cannot carry more"
+		"machine":
+			if n >= 3: return "You cannot carry more"
+		"bullet":
+			if n >= 10: return "You cannot carry more bullets"
+	return ""
+
+
+func buy(id: String) -> void:
+	shop_msg = cannot_buy(id)
+	if shop_msg != "":
+		return
+	save.crystals -= D.ITEMS[id].price
+	match id:
+		"bow", "gun": save.items[id] = 5              # 5 shots before it breaks
+		"quiver": save.items[id] = 1
+		"torch":
+			save.items.torch = 1
+			save.items.torch_charge = D.TORCH_TIME
+		_: save.items[id] = item_count(id) + 1
+	persist()
+	shop_msg = "Bought: %s" % D.ITEMS[id].name
+	sfx.play("achievement")
+
+
+## The usable items the player has, in the order of their squares on screen
+func owned_items() -> Array:
+	return D.USABLE.filter(func(id): return item_count(id) > 0 or (id == "machine" and machine != null))
+
+
+func equip(id: String) -> void:
+	equipped = "" if equipped == id else id
+	torch_cell = -1
+
+
+func aim_dir() -> Vector2:
+	var d = face if touch_mode else screen_to_world(mouse_pos) - player
+	return d.normalized() if d.length() > 1.0 else face
+
+
+## The lines shown in the status panel for the item in hand
+func item_status(id: String) -> Array:
+	match id:
+		"powder": return ["Uses left: %d" % item_count("powder"), "Click to scatter (lasts 5s)"]
+		"bow": return ["Shots before it breaks: %d / 5" % item_count("bow"), "Arrows: %d / %d" % [item_count("arrow"), arrow_cap("arrow")],
+			"Poison arrows: %d / %d" % [item_count("poison"), arrow_cap("poison")], "Loaded: %s  (Q to switch)" % ("poison" if arrow_kind == "poison" else "normal")]
+		"torch": return ["Charge: %.1fs / %ds" % [save.items.torch_charge, int(D.TORCH_TIME)], "Tentacle pickup: +2s"]
+		"machine":
+			if machine != null:
+				return ["Placed", "Click to set it off" if machine.state == "set" else "Clapping: %d / 3" % machine.claps]
+			return ["Machines: %d" % item_count("machine"), "Click to place it here"]
+		"gun": return ["Shots before it breaks: %d / 5" % item_count("gun"), "Bullets: %d" % item_count("bullet"),
+			"Ready" if gun_reload <= 0.0 else "Reloading: %.1fs" % gun_reload]
+	return []
+
+
+## Where an arrow shot along `dir` will fly: it slows and curves, and stops at a wall
+func arrow_path(dir: Vector2) -> PackedVector2Array:
+	var pts = PackedVector2Array([player])
+	var side = Vector2(-dir.y, dir.x)
+	for k in range(1, 17):
+		var t = k / 16.0
+		var pt = player + dir * D.BOW_RANGE * t + side * 14.0 * t * t * t
+		if is_wall(pt):
+			break
+		pts.append(pt)
+	if pts.size() < 2:
+		pts.append(player + dir * 2.0)
+	return pts
+
+
+func _gun_end(dir: Vector2) -> Vector2:
+	var pt = player
+	for k in int(D.GUN_RANGE / 4.0):
+		if is_wall(pt + dir * 4.0):
+			break
+		pt += dir * 4.0
+	return pt
+
+
+func _say(text: String) -> void:
+	kill_text = text
+	kill_t = 2.5
+
+
+func use_item(target: Vector2) -> void:
+	var dir = (target - player).normalized() if target.distance_to(player) > 4.0 else aim_dir()
+	if touch_mode:
+		face = dir
+	match equipped:
+		"powder":
+			if item_count("powder") <= 0: return
+			save.items.powder = item_count("powder") - 1
+			mists.append({ "pos": player, "t": 5.0 })
+			sfx.play("whisper", player)
+			if item_count("powder") == 0: equipped = ""
+		"bow":
+			if item_count(arrow_kind) <= 0:
+				arrow_kind = "arrow"
+			if item_count(arrow_kind) <= 0:
+				_say("No arrows")
+				return
+			save.items[arrow_kind] = item_count(arrow_kind) - 1
+			save.items.bow = item_count("bow") - 1
+			arrows_fly.append({ "pts": arrow_path(dir), "at": 0.0, "kind": arrow_kind })
+			sfx.play("toss", player)
+			if item_count("bow") == 0:
+				_say("The bow snaps.")
+				equipped = ""
+		"gun":
+			if gun_reload > 0.0: return
+			if item_count("bullet") <= 0:
+				_say("No bullets")
+				return
+			save.items.bullet = item_count("bullet") - 1
+			save.items.gun = item_count("gun") - 1
+			gun_reload = 4.0
+			var end = _gun_end(dir)
+			var hit = null
+			var steps = int(player.distance_to(end) / 4.0)
+			for k in steps + 1:
+				var pt = player + dir * 4.0 * k
+				for e in enemies:
+					if pt.distance_to(e.pos) < e.r:
+						hit = e
+						end = pt
+				if hit != null: break
+			shots.append({ "a": player, "b": end, "life": 1.0 })
+			if hit != null: damage(hit, 100.0)
+			make_noise(player, 600.0)
+			shake = maxf(shake, 5.0)
+			sfx.play("kill", player)
+			if item_count("gun") == 0:
+				_say("The gun falls apart.")
+				equipped = ""
+		"machine":
+			if machine == null:
+				if item_count("machine") <= 0: return
+				save.items.machine = item_count("machine") - 1
+				machine = { "pos": player, "state": "set", "t": 0.0, "claps": 0 }
+				_say("Clapping machine placed. Use it again to set it off.")
+			elif machine.state == "set":
+				machine.state = "clapping"
+				machine.t = 0.4
+	persist()
+
+
+func update_items(dt: float) -> void:
+	gun_reload = maxf(0.0, gun_reload - dt)
+
+	# torch burns down while it is in the hand
+	if equipped == "torch" and save.items.torch_charge > 0.0:
+		save.items.torch_charge = maxf(0.0, save.items.torch_charge - dt)
+		if save.items.torch_charge <= 0.0:
+			_say("The torch has burned out.")
+
+	# sleep powder: a raging Sleeper that enters the mist falls asleep
+	for k in range(mists.size() - 1, -1, -1):
+		var m = mists[k]
+		m.t -= dt
+		for e in enemies:
+			if e.type == "sleeper" and e.sleep != "dormant" and e.pos.distance_to(m.pos) < 46.0:
+				e.sleep = "dormant"
+				e.agitation = 0.0
+				e.dmap = null
+				e.next = null
+				_say("The Sleeper sinks back into sleep.")
+		if m.t <= 0.0:
+			mists.remove_at(k)
+
+	# arrows in flight
+	for k in range(arrows_fly.size() - 1, -1, -1):
+		var a = arrows_fly[k]
+		a.at += 300.0 * dt / (D.BOW_RANGE / 16.0)
+		var i = mini(int(a.at), a.pts.size() - 2)
+		var pos: Vector2 = a.pts[i].lerp(a.pts[i + 1], clampf(a.at - i, 0.0, 1.0))
+		var hit = null
+		for e in enemies:
+			if pos.distance_to(e.pos) < e.r + 3.0:
+				hit = e
+		if hit != null:
+			if a.kind == "poison":
+				hit.noregen_t = 10.0
+			damage(hit, 30.0)
+			arrows_fly.remove_at(k)
+		elif a.at >= a.pts.size() - 1:
+			var last = a.pts.size() - 1
+			arrows_stuck.append({ "pos": a.pts[last], "ang": (a.pts[last] - a.pts[last - 1]).angle(), "kind": a.kind })
+			arrows_fly.remove_at(k)
+
+	# walk over a missed arrow to take it back
+	for k in range(arrows_stuck.size() - 1, -1, -1):
+		var st = arrows_stuck[k]
+		if player.distance_to(st.pos) < 15.0 and item_count(st.kind) < arrow_cap(st.kind):
+			save.items[st.kind] = item_count(st.kind) + 1
+			arrows_stuck.remove_at(k)
+			sfx.play("note")
+
+	# the clapping machine: three claps every creature can hear, then it blows up
+	if machine != null and machine.state == "clapping":
+		machine.t -= dt
+		if machine.t <= 0.0:
+			if machine.claps < 3:
+				machine.claps += 1
+				machine.t = 0.7
+				make_noise(machine.pos, 1000000.0)
+				sfx.play("clap", machine.pos)
+				shake = maxf(shake, 3.0)
+			else:
+				spawn_ripple(machine.pos, { "max_r": 4000.0, "speed": 480.0, "alpha": 1.0, "light": 1.0, "kind": "gold" })
+				make_noise(machine.pos, 1000000.0)
+				sfx.play("kill", machine.pos)
+				shake = 12.0
+				machine = null
+				if equipped == "machine" and item_count("machine") == 0:
+					equipped = ""
+
+
+func _rotated(c: CanvasItem, sprite: String, pos: Vector2, ang: float, size: float) -> void:
+	var t: Texture2D = tex["spr_" + sprite]
+	var fh = t.get_height()
+	var f = int(time * 8.0) % (t.get_width() / fh)
+	c.draw_set_transform(pos, ang, Vector2.ONE)
+	c.draw_texture_rect_region(t, Rect2(-size / 2.0, -size / 2.0, size, size), Rect2(f * fh, 0, fh, fh))
+	c.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func trigger_title_menu(idx: int) -> void:
@@ -1853,7 +2242,7 @@ func run_command(raw: String) -> void:
 			pebbles += 5
 			console_msg = "+5 pebbles added"
 		"level":
-			var usage = "usage: level <1-%d>, level wizard <1-2> or level endless <round>" % D.LEVELS.size()
+			var usage = "usage: level <1-%d>, level wizard <1-3> or level endless <round>" % D.LEVELS.size()
 			if a == "endless" or a == "e":
 				if b.to_int() < 1:
 					console_msg = usage
@@ -1865,7 +2254,7 @@ func run_command(raw: String) -> void:
 					console_msg = "jumped to endless round %d" % endless_round
 			elif a == "wizard" or a == "w":
 				mode = "story"
-				wizard_stop = 2 if b.to_int() == 2 else 1
+				wizard_stop = clampi(b.to_int(), 1, D.WIZARD_AFTER.size())
 				level_idx = D.WIZARD_AFTER[wizard_stop - 1]
 				start_level(false)
 				console_msg = "jumped to the wizard's hollow (visit %d)" % wizard_stop

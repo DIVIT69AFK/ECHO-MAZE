@@ -14,6 +14,10 @@ uniform sampler2D f3 : filter_linear, repeat_disable;
 uniform sampler2D f4 : filter_linear, repeat_disable;
 uniform sampler2D f5 : filter_linear, repeat_disable;
 
+uniform sampler2D ft : filter_linear, repeat_disable;   // travel distances from the player, for the torch
+uniform vec4 torch = vec4(0.0);   // xy = position, z = range, w = strength (0 = off)
+uniform vec2 torch_dir = vec2(1.0, 0.0);
+
 uniform vec4 wave[6];      // x = how far the front has travelled (px), y = its reach, z = strength (0 = unused), w = length of the fading tail (px)
 uniform vec4 wcol[6];      // rgb = colour of the wave lines, a = 1 for a plain circle with no maze (title screen)
 uniform vec2 worigin[6];   // where the sound started
@@ -58,6 +62,18 @@ void fragment() {
 	for (int i = 0; i < glow_n; i++) {
 		float u = clamp(1.0 - distance(world, glow[i].xy) / glow[i].z, 0.0, 1.0);
 		light += glow[i].w * u * u;
+	}
+
+	// the torch: a beam that starts as a point at the player, widens and thins out with distance,
+	// and is stopped by walls (a spot only lights if the way to it is nearly straight)
+	if (torch.w > 0.0) {
+		vec2 v = world - torch.xy;
+		float dist = length(v);
+		if (dist < torch.z && texture(ft, fuv).r < dist * 1.3 + 12.0) {
+			float along = dot(v / max(dist, 0.001), torch_dir);
+			float edge = mix(0.985, 0.80, dist / torch.z);
+			light += torch.w * smoothstep(edge - 0.07, edge + 0.01, along) * (1.0 - 0.8 * dist / torch.z);
+		}
 	}
 
 	COLOR = vec4(lines, 1.0 - clamp(light, 0.0, 1.0));

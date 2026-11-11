@@ -10,6 +10,7 @@ var mono: SystemFont
 var vignette: Texture2D
 var W := 0.0   # size of the virtual screen the menus are laid out on (real size / UI scale)
 var H := 0.0
+var shop_hits: Array = []   # clickable areas of the shop: { rect, act }
 
 const GOLD := Color8(255, 235, 160)
 const PALE := Color8(220, 230, 250)
@@ -22,6 +23,7 @@ const TOUCH_MENUS := {
 	"credits": [["BACK", "Escape"]],
 	"settings": [["▲", "ArrowUp"], ["▼", "ArrowDown"], ["◀", "ArrowLeft"], ["▶", "ArrowRight"], ["BACK", "Escape"]],
 	"ending": [["OK", "Enter"]],
+	"shop": [["BACK", "Escape"]],
 	"pause": [["RESUME", "Escape"], ["RESTART", "KeyR"], ["JOURNAL", "KeyJ"], ["MUTE", "KeyM"], ["QUIT", "KeyQ"]],
 }
 
@@ -98,7 +100,7 @@ func touch_buttons() -> Array:
 			{ "label": "WHISPER", "code": "KeyZ", "pos": Vector2(gw - r * 4.1, gh - r * 1.3), "r": r * 0.9 },
 			{ "label": "SNEAK", "code": "KeyX", "pos": Vector2(gw - r * 1.4, gh - r * 4.2), "r": r * 0.9, "on": game.sneak_toggle },
 			{ "label": "II", "code": "Escape", "pos": Vector2(gw - 28.0, 84.0), "r": 18.0 },
-		]
+		] + ([{ "label": "TRADE", "code": "KeyE", "pos": Vector2(gw / 2.0, gh - r * 1.5), "r": r, "on": true }] if game.near_wizard() else [])
 	if not TOUCH_MENUS.has(game.state):
 		return []
 	var list: Array = TOUCH_MENUS[game.state]
@@ -323,30 +325,36 @@ func _draw_game_hud() -> void:
 	if game.sneak_toggle:
 		txt(spaced("SNEAKING"), 22.0, 46.0, 11, 0.45, Color.WHITE, -1)
 
-	# equipped items: icons bottom-left, hover (or tap) one to see what it does
-	var mouse: Vector2 = game.mouse_pos / game.UIS
-	var hovered = null
-	for k in save.upgrades.size():
-		var id: String = save.upgrades[k]
-		if not game.tex.has("spr_" + id):
-			continue
+	# the items you own: squares bottom-left. Click one (or press its number) to hold it.
+	var owned: Array = game.owned_items()
+	for k in owned.size():
+		var id: String = owned[k]
 		var r = Rect2(22.0 + k * 48.0, H - 64.0, 42, 42)
-		var hover = r.has_point(mouse)
-		if hover:
-			for u in D.UPGRADES:
-				if u.id == id:
-					hovered = u
-		box(r, Color(0.16, 0.24, 0.31, 0.92) if hover else Color(0.04, 0.055, 0.086, 0.78), Color(0.59, 0.86, 1.0, 0.95 if hover else 0.35))
-		draw_texture_rect_region(game.tex["spr_" + id], Rect2(r.position + Vector2(5, 5), Vector2(32, 32)), Rect2(0, 0, 24, 24))
-	if hovered != null:
-		var lines = wrap_text(hovered.desc, minf(330.0, W - 68.0), mono, 12)
-		var bw = minf(360.0, W - 44.0)
-		var bh = 38.0 + lines.size() * 18.0
-		var by = H - 74.0 - bh
-		box(Rect2(22.0, by, bw, bh), Color(0.03, 0.047, 0.078, 0.94), Color(0.59, 0.86, 1.0, 0.6))
-		txt(spaced(hovered.name.to_upper()), 36.0, by + 20.0, 12, 0.95, Color8(150, 220, 255), -1)
+		var held: bool = game.equipped == id
+		box(r, Color(0.2, 0.15, 0.36, 0.95) if held else Color(0.04, 0.055, 0.086, 0.78), Color(0.95, 0.79, 0.3, 0.95) if held else Color(0.59, 0.86, 1.0, 0.35))
+		draw_texture_rect_region(game.tex["spr_icon_" + id], Rect2(r.position + Vector2(5, 5), Vector2(32, 32)), Rect2(0, 0, 24, 24))
+		txt(str(k + 1), r.position.x + 6.0, r.position.y + 7.0, 9, 0.6, Color.WHITE, -1)
+		var count = ""
+		if id == "powder" or id == "machine": count = "x%d" % game.item_count(id)
+		elif id == "bow": count = str(game.item_count("arrow") + game.item_count("poison"))
+		elif id == "gun": count = str(game.item_count("bullet"))
+		elif id == "torch": count = "%ds" % int(save.items.torch_charge)
+		txt(count, r.position.x + 38.0, r.position.y + 35.0, 9, 0.9, GOLD, 1)
+
+	# status of the item in your hand, on the right
+	if game.equipped != "":
+		var lines: Array = game.item_status(game.equipped)
+		var sw = 230.0
+		var sy = 96.0 if W >= 700.0 else 118.0
+		var sh = 30.0 + lines.size() * 17.0
+		box(Rect2(W - sw - 16.0, sy, sw, sh), Color(0.03, 0.047, 0.078, 0.9), Color(0.95, 0.79, 0.3, 0.6))
+		draw_texture_rect_region(game.tex["spr_icon_" + game.equipped], Rect2(W - sw - 10.0, sy + 3.0, 22, 22), Rect2(0, 0, 24, 24))
+		txt(spaced(D.ITEMS[game.equipped].name.to_upper()), W - sw + 16.0, sy + 14.0, 10, 0.95, GOLD, -1)
 		for k in lines.size():
-			txt(lines[k], 36.0, by + 42.0 + k * 18.0, 12, 0.85, Color.WHITE, -1)
+			txt(lines[k], W - sw - 4.0, sy + 36.0 + k * 17.0, 11, 0.85, Color.WHITE, -1)
+		if game.equipped == "torch":
+			var frac: float = save.items.torch_charge / D.TORCH_TIME
+			draw_rect(Rect2(W - sw - 4.0, sy + sh - 6.0, (sw - 24.0) * frac, 3.0), Color(1.0, 0.6, 0.15, 0.9))
 
 	var dev = []
 	if game.light_mode: dev.append("LIGHT")
@@ -356,8 +364,14 @@ func _draw_game_hud() -> void:
 		txt(spaced("DEV: " + " · ".join(dev)), 22.0, 86.0, 11, 0.45, Color8(255, 220, 160), -1)
 
 	var narrow = W < 700.0
+	# blue crystals (the currency), always shown
+	var cy = 70.0 if narrow else 48.0
+	draw_texture_rect_region(game.tex.spr_bluecrystal, Rect2(W - 42.0, cy - 11.0, 22, 22), Rect2(0, 0, 24, 24))
+	txt(str(save.crystals), W - 46.0, cy, 12, 0.85, Color8(140, 190, 255), 1)
 	if game.wizard_pos != null:
 		txt(spaced("EXPERIENCE  %d" % save.xp), W - 22.0, 48.0 if narrow else 26.0, 12, 0.8, Color8(242, 201, 76), 1)
+		if game.near_wizard() and game.state == "play" and not game.touch_mode:
+			txt("E  ·  TRADE WITH THE WIZARD", cx, H * 0.82, 14, 0.85, GOLD)
 	else:
 		var py = 37.0 if narrow else 15.0
 		for k in game.pebbles:
@@ -412,11 +426,122 @@ func _draw_game_hud() -> void:
 			for k in rows.size():
 				txt(rows[k], cx, H * 0.38 + k * 30.0, 14, 0.75)
 
+	if game.state == "shop":
+		_draw_shop()
+
 	if game.console_msg_t > 0.0:
 		txt(game.console_msg, 22.0, H - 76.0, 13, 0.85 * minf(1.0, game.console_msg_t), Color8(255, 220, 160), -1)
 	if game.console_open:
 		draw_rect(Rect2(0, H - 56.0, W, 36.0), Color(0, 0, 0, 0.9))
 		txt("> " + game.console_text + ("_" if int(game.time * 2.0) % 2 == 1 else " "), 22.0, H - 38.0, 14, 0.95, Color8(255, 220, 160), -1)
+
+
+# ---------------------------------------------------------------- the wizard's shop
+func shop_action_at(p: Vector2) -> String:
+	for h in shop_hits:
+		if h.rect.has_point(p):
+			return h.act
+	return ""
+
+
+func _draw_shop() -> void:
+	var save: Dictionary = game.save
+	var cx = W / 2.0
+	shop_hits = []
+	draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 0.72))
+	var pw = minf(560.0, W - 20.0)
+	var ph = 470.0
+	var px = cx - pw / 2.0
+	var py = maxf(60.0, H / 2.0 - ph / 2.0 - 20.0)
+	box(Rect2(px, py, pw, ph), Color(0.07, 0.05, 0.13, 0.96), Color(0.95, 0.79, 0.3, 0.7))
+	txt(spaced("THE WIZARD'S SHOP"), cx, py + 26.0, 14, 0.95, GOLD)
+
+	# what the player has
+	draw_texture_rect_region(game.tex.spr_bluecrystal, Rect2(px + 18.0, py + 44.0, 24, 24), Rect2((int(game.time * 2.0) % 2) * 24, 0, 24, 24))
+	txt("%d blue crystals" % save.crystals, px + 48.0, py + 56.0, 13, 0.9, Color8(140, 190, 255), -1)
+	txt("%d experience" % save.xp, px + pw - 18.0, py + 56.0, 13, 0.9, Color8(242, 201, 76), 1)
+
+	# the two tabs
+	var labels = ["SHOP", "SELL"]
+	var tw = (pw - 46.0) / 2.0
+	for i in 2:
+		var r = Rect2(px + 18.0 + i * (tw + 10.0), py + 78.0, tw, 34.0)
+		var on = game.shop_tab == i
+		box(r, Color(0.2, 0.15, 0.36, 0.95) if on else Color(0.05, 0.04, 0.09, 0.9), Color(0.95, 0.79, 0.3, 0.9 if on else 0.25))
+		txt(spaced(labels[i]), r.position.x + tw / 2.0, r.position.y + 17.0, 13, 0.95 if on else 0.55, GOLD if on else PALE)
+		shop_hits.append({ "rect": r, "act": "tab%d" % i })
+
+	var top = py + 126.0
+	if game.shop_tab == 0:
+		# Shop: three tiers of three items, each tier opened by experience
+		var lw = 86.0
+		var cw2 = (pw - 36.0 - lw - 20.0) / 3.0
+		for i in D.ITEM_ORDER.size():
+			var id: String = D.ITEM_ORDER[i]
+			var it: Dictionary = D.ITEMS[id]
+			var tier: Dictionary = D.SHOP_TIERS[it.tier]
+			var open: bool = save.xp >= tier.xp
+			var ry = top + it.tier * 72.0
+			if i % 3 == 0:
+				txt(tier.name, px + 18.0, ry + 20.0, 12, 0.95 if open else 0.45, GOLD if open else PALE, -1)
+				txt("OPEN" if open else "%d XP" % tier.xp, px + 18.0, ry + 40.0, 10, 0.75 if open else 0.45, Color8(150, 255, 190) if open else PALE, -1)
+			var r2 = Rect2(px + 18.0 + lw + (i % 3) * (cw2 + 10.0), ry, cw2, 62.0)
+			var sel: bool = game.shop_buy_sel == i
+			box(r2, Color(0.16, 0.24, 0.31, 0.92) if sel else Color(0.05, 0.06, 0.1, 0.85), Color(0.59, 0.86, 1.0, 0.95 if sel else 0.25))
+			var dim = 1.0 if open else 0.35
+			draw_texture_rect_region(game.tex["spr_icon_" + id], Rect2(r2.position.x + 6.0, r2.position.y + 13.0, 36, 36), Rect2(0, 0, 24, 24), Color(1, 1, 1, dim))
+			var words: Array = it.name.split(" ")
+			txt(words[0], r2.position.x + 46.0, r2.position.y + 15.0, 10, 0.9 * dim, Color.WHITE, -1)
+			if words.size() > 1:
+				txt(" ".join(words.slice(1)), r2.position.x + 46.0, r2.position.y + 28.0, 10, 0.9 * dim, Color.WHITE, -1)
+			draw_texture_rect_region(game.tex.spr_bluecrystal, Rect2(r2.position.x + 44.0, r2.position.y + 38.0, 16, 16), Rect2(0, 0, 24, 24), Color(1, 1, 1, dim))
+			txt(str(it.price), r2.position.x + 62.0, r2.position.y + 47.0, 11, 0.9 * dim, Color8(140, 190, 255), -1)
+			shop_hits.append({ "rect": r2, "act": "pick%d" % i })
+		var pick: Dictionary = D.ITEMS[D.ITEM_ORDER[game.shop_buy_sel]]
+		var dl = wrap_text(pick.desc, pw - 40.0, serif_i, 12)
+		for k in dl.size():
+			txt(dl[k], cx, top + 228.0 + k * 16.0, 12, 0.75, Color.WHITE, 0, serif_i)
+		var why: String = game.cannot_buy(D.ITEM_ORDER[game.shop_buy_sel])
+		var rb = Rect2(cx - 110.0, top + 268.0, 220.0, 36.0)
+		box(rb, Color(0.12, 0.3, 0.2, 0.9) if why == "" else Color(0.06, 0.06, 0.08, 0.8), Color(0.59, 1.0, 0.75, 0.7) if why == "" else Color(1, 1, 1, 0.15))
+		txt("BUY  ·  %d crystals" % pick.price, cx, rb.position.y + 18.0, 12, 0.95 if why == "" else 0.4)
+		shop_hits.append({ "rect": rb, "act": "buy" })
+		txt(game.shop_msg if game.shop_msg != "" else why, cx, top + 318.0, 11, 0.8, Color8(150, 255, 190) if game.shop_msg.begins_with("Bought") else Color8(255, 200, 160))
+	else:
+		# Sell: a grid of everything creatures drop
+		var cw = (pw - 36.0 - 30.0) / 4.0
+		for i in D.DROP_ORDER.size():
+			var drop: Dictionary = D.DROPS[D.DROP_ORDER[i]]
+			var have = int(save.inv.get(drop.id, 0))
+			var r3 = Rect2(px + 18.0 + i * (cw + 10.0), top, cw, 150.0)
+			var sel = game.shop_sel == i
+			box(r3, Color(0.16, 0.24, 0.31, 0.92) if sel else Color(0.05, 0.06, 0.1, 0.85), Color(0.59, 0.86, 1.0, 0.95 if sel else 0.25))
+			var isz = minf(64.0, cw - 16.0)
+			draw_texture_rect(game.tex["spr_icon_" + drop.id], Rect2(r3.position.x + (cw - isz) / 2.0, r3.position.y + 10.0, isz, isz), false,
+				Color(1, 1, 1, 1.0 if have > 0 else 0.35))
+			var words = drop.name.split(" ")
+			txt(words[0], r3.position.x + cw / 2.0, r3.position.y + 88.0, 11, 0.9 if have > 0 else 0.45)
+			txt(words[1], r3.position.x + cw / 2.0, r3.position.y + 102.0, 11, 0.9 if have > 0 else 0.45)
+			txt("x %d" % have, r3.position.x + cw / 2.0, r3.position.y + 120.0, 13, 0.95 if have > 0 else 0.4, GOLD)
+			draw_texture_rect_region(game.tex.spr_bluecrystal, Rect2(r3.position.x + cw / 2.0 - 34.0, r3.position.y + 128.0, 16, 16), Rect2(0, 0, 24, 24))
+			txt("%d each" % drop.price, r3.position.x + cw / 2.0 + 8.0, r3.position.y + 137.0, 10, 0.75, Color8(140, 190, 255))
+			shop_hits.append({ "rect": r3, "act": "sel%d" % i })
+		var picked: Dictionary = D.DROPS[D.DROP_ORDER[game.shop_sel]]
+		var n = int(save.inv.get(picked.id, 0))
+		var bw = (pw - 46.0) / 2.0
+		var by = top + 164.0
+		var names = ["SELL 1  (+%d)" % picked.price, "SELL ALL  (+%d)" % (picked.price * n)]
+		var acts = ["sell1", "sellall"]
+		for i in 2:
+			var r4 = Rect2(px + 18.0 + i * (bw + 10.0), by, bw, 38.0)
+			box(r4, Color(0.12, 0.3, 0.2, 0.9) if n > 0 else Color(0.06, 0.06, 0.08, 0.8), Color(0.59, 1.0, 0.75, 0.7) if n > 0 else Color(1, 1, 1, 0.15))
+			txt(names[i], r4.position.x + bw / 2.0, r4.position.y + 19.0, 12, 0.95 if n > 0 else 0.4)
+			shop_hits.append({ "rect": r4, "act": acts[i] })
+		if not game.touch_mode:
+			txt("ENTER sells 1  ·  SPACE sells all", cx, by + 56.0, 11, 0.4)
+
+	if not game.touch_mode:
+		txt("UP / DOWN switch tab  ·  LEFT / RIGHT pick  ·  ENTER buy or sell  ·  ESC close", cx, py + ph - 16.0, 11, 0.45)
 
 
 func _draw_toast() -> void:
