@@ -1,0 +1,4 @@
+# Godot 4 — files the engine rebuilds on each computer
+.godot/
+*.translation
+export_presets.cfg
