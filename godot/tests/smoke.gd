@@ -11,7 +11,9 @@ func _initialize() -> void:
 	if args.size() >= 2 and args[0] == "shots":
 		shots_dir = args[1]
 	game = load("res://main.tscn").instantiate()
+	game.save_path = "user://test_save.json"   # never touch the real save
 	root.add_child(game)
+	game.admin_ok = true   # tests skip the console password
 	_run()
 
 ## wait n game frames' worth of time (at 60 per second)

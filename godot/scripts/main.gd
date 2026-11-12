@@ -13,7 +13,7 @@ const AFTERGLOW := 0.8              # seconds for an echo's light to fade once t
 const CELL := 8                     # size of one cell of the sound-distance grid, in world pixels
 const FAR := 60000.0                # distance value meaning "sound never reaches here"
 const STEP_SLOT := 5                # the wave slot kept for footsteps
-const SAVE_PATH := "user://save.json"
+var save_path := "user://save.json"   # tests point this at a scratch file
 
 # ---------------------------------------------------------------- state
 var state := "title"   # title, play, pause, dead, clear, ending, journal, achievements, settings, level_select, credits
@@ -112,6 +112,9 @@ var console_open := false
 var console_text := ""
 var console_msg := ""
 var console_msg_t := 0.0
+const ADMIN_PASSWORD := "b*123"
+var admin_ok := false               # the console is locked until the password is typed (once per run)
+var reset_armed := false            # Settings > Reset: true after the first press, waiting for the second
 var light_mode := false
 var has_gun := false
 var god_mode := false
@@ -260,9 +263,9 @@ func _on_resize() -> void:
 
 # ================================================================ save
 func load_save() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
+	if not FileAccess.file_exists(save_path):
 		return
-	var parsed = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(save_path))
 	if typeof(parsed) != TYPE_DICTIONARY:
 		return
 	for k in save.keys():
@@ -284,7 +287,7 @@ func load_save() -> void:
 
 
 func persist() -> void:
-	var f = FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	var f = FileAccess.open(save_path, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(save))
 
@@ -1777,11 +1780,13 @@ func on_key(code: String) -> void:
 			if code == "Escape" or code == "Enter":
 				state = "title"; menu_sel = 5
 		"settings":
-			if code == "Escape" or (ok and menu_sel == 5):
+			if code != "Enter" and code != "Space" and not left and not right:
+				reset_armed = false
+			if code == "Escape" or (ok and menu_sel == 6):
 				state = "title"; menu_sel = 6
 				persist()
-			elif up: menu_sel = (menu_sel + 5) % 6
-			elif down: menu_sel = (menu_sel + 1) % 6
+			elif up: menu_sel = (menu_sel + 6) % 7
+			elif down: menu_sel = (menu_sel + 1) % 7
 			elif left: adjust_setting(menu_sel, -1)
 			elif right or ok: adjust_setting(menu_sel, 1)
 		"credits":
@@ -2181,14 +2186,57 @@ func adjust_setting(idx: int, dir: int) -> void:
 		2: s.ambVol = clampf(s.ambVol + dir * 0.1, 0.0, 1.0)
 		3: s.screenShake = not s.screenShake
 		4: s.character = 0 if s.character else 1
+		5:
+			# reset: the first press arms it, the second press does it
+			if reset_armed:
+				reset_progress()
+			else:
+				reset_armed = true
+			return
 	sfx.apply_volumes(s)
 	persist()
+
+
+## Start over: wipes progress and everything owned. Sound and character settings are kept.
+func reset_progress() -> void:
+	save.depth = 1
+	save.completed = false
+	save.notes = []
+	save.best = {}
+	save.endlessBest = 0
+	save.xp = 0
+	save.atWizard = 0
+	save.crystals = 0
+	save.achievements = []
+	save.upgrades = []
+	for k in save.inv.keys():
+		save.inv[k] = 0
+	for k in save.items.keys():
+		save.items[k] = 0.0 if k == "torch_charge" else 0
+	for k in save.stats.keys():
+		save.stats[k] = 0.0 if k == "timePlayed" else 0
+	persist()
+	equipped = ""
+	arrow_kind = "arrow"
+	reset_armed = false
+	to_title()
+	menu_sel = 0
+	toast_queue = []
+	toast_current = null
+	console_msg = "All progress has been reset."
+	console_msg_t = 4.0
 
 
 # ================================================================ developer console
 func run_command(raw: String) -> void:
 	var parts = raw.strip_edges().to_lower().split(" ", false)
 	if parts.is_empty():
+		return
+	if not admin_ok:
+		# the console only works after the admin password has been typed
+		console_msg_t = 4.5
+		admin_ok = raw.strip_edges() == ADMIN_PASSWORD
+		console_msg = "admin commands unlocked" if admin_ok else "wrong password"
 		return
 	var a = parts[1] if parts.size() > 1 else ""
 	var b = parts[2] if parts.size() > 2 else ""
@@ -2266,7 +2314,14 @@ func run_command(raw: String) -> void:
 				console_msg = "jumped to depth %d: %s" % [level_idx + 1, D.LEVELS[level_idx].name]
 			else:
 				console_msg = usage
+		"give_c":
+			if not a.is_valid_int():
+				console_msg = "usage: give_c <number>"
+			else:
+				save.crystals = maxi(0, save.crystals + a.to_int())
+				persist()
+				console_msg = "blue crystals: %d" % save.crystals
 		"help":
-			console_msg = "commands: light_mode, give_gun, god_mode, tp, unlock_all, spawn_sleeper, next_level, add_pebbles, level, help"
+			console_msg = "commands: light_mode, give_gun, god_mode, tp, unlock_all, spawn_sleeper, next_level, add_pebbles, level, give_c, help"
 		_:
 			console_msg = "unknown command: %s (type help)" % parts[0]

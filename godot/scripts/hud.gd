@@ -258,12 +258,13 @@ func _draw_ui() -> void:
 			var opts = [
 				"MASTER VOLUME: %d%%" % roundi(s.masterVol * 100), "SFX VOLUME: %d%%" % roundi(s.sfxVol * 100),
 				"AMBIENCE VOLUME: %d%%" % roundi(s.ambVol * 100), "SCREEN SHAKE: %s" % ("ENABLED" if s.screenShake else "DISABLED"),
-				"CHARACTER: %s" % ("BOY WITH THE RED SCARF" if s.character else "BOY IN THE RED CAP"), "BACK TO TITLE",
+				"CHARACTER: %s" % ("BOY WITH THE RED SCARF" if s.character else "BOY IN THE RED CAP"),
+				"PRESS AGAIN TO ERASE EVERYTHING" if game.reset_armed else "RESET ALL PROGRESS", "BACK TO TITLE",
 			]
 			for k in opts.size():
 				_menu_line(opts[k], k, H * 0.36 + k * 36.0, 15)
 			var pt: Texture2D = game.tex["spr_player%d" % (1 if s.character else 0)]
-			draw_texture_rect_region(pt, Rect2(cx - 40.0, H * 0.36 + 6 * 36.0, 80, 80), Rect2((int(game.time * 3.0) % 2) * 24, 0, 24, 24))
+			draw_texture_rect_region(pt, Rect2(cx - 40.0, H * 0.36 + 7 * 36.0, 80, 80), Rect2((int(game.time * 3.0) % 2) * 24, 0, 24, 24))
 			if not game.touch_mode:
 				txt("UP / DOWN to navigate  ·  LEFT / RIGHT to adjust  ·  ESC to return", cx, H - 54.0, 13, 0.45)
 			return
@@ -433,7 +434,8 @@ func _draw_game_hud() -> void:
 		txt(game.console_msg, 22.0, H - 76.0, 13, 0.85 * minf(1.0, game.console_msg_t), Color8(255, 220, 160), -1)
 	if game.console_open:
 		draw_rect(Rect2(0, H - 56.0, W, 36.0), Color(0, 0, 0, 0.9))
-		txt("> " + game.console_text + ("_" if int(game.time * 2.0) % 2 == 1 else " "), 22.0, H - 38.0, 14, 0.95, Color8(255, 220, 160), -1)
+		var shown: String = game.console_text if game.admin_ok else "*".repeat(game.console_text.length())
+		txt(("> " if game.admin_ok else "password: ") + shown + ("_" if int(game.time * 2.0) % 2 == 1 else " "), 22.0, H - 38.0, 14, 0.95, Color8(255, 220, 160), -1)
 
 
 # ---------------------------------------------------------------- the wizard's shop

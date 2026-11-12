@@ -8,7 +8,9 @@ var dir := ""
 func _initialize() -> void:
 	dir = OS.get_cmdline_user_args()[0]
 	game = load("res://main.tscn").instantiate()
+	game.save_path = "user://test_save.json"   # never touch the real save
 	root.add_child(game)
+	game.admin_ok = true   # tests skip the console password
 	_run()
 
 func wait(sec: float) -> void:
